@@ -36,6 +36,10 @@ func main() {
 		if err := cmdRotateSeed(os.Args[2:]); err != nil {
 			log.Fatal(err)
 		}
+	case "init":
+		if err := cmdInit(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
 	case "kv":
 		if err := cmdKV(os.Args[2:]); err != nil {
 			log.Fatal(err)
@@ -130,7 +134,7 @@ func mustParse(fs *flag.FlagSet) {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "sweet commands: summary | list | register | login | rotate-seed | kv\n")
+	fmt.Fprintf(os.Stderr, "sweet commands: summary | list | register | login | rotate-seed | init | kv\n")
 }
 
 func registerCmd() {

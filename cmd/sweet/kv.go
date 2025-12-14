@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 	"time"
 
 	"suitesync/cmd/internal/appcli"
@@ -13,7 +14,51 @@ import (
 
 const kvEntity = "kv"
 
+type parsedConfig struct {
+	runtime appcli.RuntimeConfig
+	flagSet *flag.FlagSet
+}
+
+func loadRuntimeConfig(args []string) (*parsedConfig, error) {
+	// Load config from file (with env overrides)
+	fileCfg, err := LoadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+
+	// Create runtime config with defaults from file
+	rtCfg := appcli.RuntimeConfig{
+		SeedPhrase: fileCfg.Seed,
+		VaultPath:  fileCfg.VaultDB,
+		AppDBPath:  fileCfg.AppDB,
+		DeviceID:   fileCfg.DeviceID,
+		ServerURL:  fileCfg.Server,
+		AuthToken:  fileCfg.Token,
+	}
+
+	// Parse flags (flags override config)
+	fs := flag.NewFlagSet("kv", flag.ExitOnError)
+	rtCfg.BindFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+
+	return &parsedConfig{
+		runtime: rtCfg,
+		flagSet: fs,
+	}, nil
+}
+
 func cmdKV(args []string) error {
+	// Auto-initialize config if it doesn't exist
+	if !ConfigExists() {
+		fmt.Fprintf(os.Stderr, "No config found. Initializing sweet...\n")
+		if _, err := InitConfig(); err != nil {
+			return fmt.Errorf("auto-init config: %w", err)
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+
 	if len(args) < 1 {
 		return fmt.Errorf("kv requires a subcommand: set | get | list | delete | sync")
 	}
@@ -35,13 +80,12 @@ func cmdKV(args []string) error {
 }
 
 func kvSet(args []string) error {
-	fs := flag.NewFlagSet("kv set", flag.ExitOnError)
-	var cfg appcli.RuntimeConfig
-	cfg.BindFlags(fs)
-	if err := fs.Parse(args); err != nil {
+	cfg, err := loadRuntimeConfig(args)
+	if err != nil {
 		return err
 	}
 
+	fs := cfg.flagSet
 	if fs.NArg() < 2 {
 		return fmt.Errorf("usage: kv set <key> <value>")
 	}
@@ -49,7 +93,7 @@ func kvSet(args []string) error {
 	key := fs.Arg(0)
 	value := fs.Arg(1)
 
-	return runKVApp(cfg, func(ctx context.Context, app *appcli.App) error {
+	return runKVApp(cfg.runtime, func(ctx context.Context, app *appcli.App) error {
 		payload := map[string]any{
 			"value": value,
 		}
@@ -62,20 +106,19 @@ func kvSet(args []string) error {
 }
 
 func kvGet(args []string) error {
-	fs := flag.NewFlagSet("kv get", flag.ExitOnError)
-	var cfg appcli.RuntimeConfig
-	cfg.BindFlags(fs)
-	if err := fs.Parse(args); err != nil {
+	cfg, err := loadRuntimeConfig(args)
+	if err != nil {
 		return err
 	}
 
+	fs := cfg.flagSet
 	if fs.NArg() < 1 {
 		return fmt.Errorf("usage: kv get <key>")
 	}
 
 	key := fs.Arg(0)
 
-	return runKVApp(cfg, func(ctx context.Context, app *appcli.App) error {
+	return runKVApp(cfg.runtime, func(ctx context.Context, app *appcli.App) error {
 		records, err := app.DumpRecords(ctx)
 		if err != nil {
 			return err
@@ -100,14 +143,12 @@ func kvGet(args []string) error {
 }
 
 func kvList(args []string) error {
-	fs := flag.NewFlagSet("kv list", flag.ExitOnError)
-	var cfg appcli.RuntimeConfig
-	cfg.BindFlags(fs)
-	if err := fs.Parse(args); err != nil {
+	cfg, err := loadRuntimeConfig(args)
+	if err != nil {
 		return err
 	}
 
-	return runKVApp(cfg, func(ctx context.Context, app *appcli.App) error {
+	return runKVApp(cfg.runtime, func(ctx context.Context, app *appcli.App) error {
 		records, err := app.DumpRecords(ctx)
 		if err != nil {
 			return err
@@ -133,20 +174,19 @@ func kvList(args []string) error {
 }
 
 func kvDelete(args []string) error {
-	fs := flag.NewFlagSet("kv delete", flag.ExitOnError)
-	var cfg appcli.RuntimeConfig
-	cfg.BindFlags(fs)
-	if err := fs.Parse(args); err != nil {
+	cfg, err := loadRuntimeConfig(args)
+	if err != nil {
 		return err
 	}
 
+	fs := cfg.flagSet
 	if fs.NArg() < 1 {
 		return fmt.Errorf("usage: kv delete <key>")
 	}
 
 	key := fs.Arg(0)
 
-	return runKVApp(cfg, func(ctx context.Context, app *appcli.App) error {
+	return runKVApp(cfg.runtime, func(ctx context.Context, app *appcli.App) error {
 		if err := app.Delete(ctx, key); err != nil {
 			return err
 		}
@@ -156,14 +196,12 @@ func kvDelete(args []string) error {
 }
 
 func kvSync(args []string) error {
-	fs := flag.NewFlagSet("kv sync", flag.ExitOnError)
-	var cfg appcli.RuntimeConfig
-	cfg.BindFlags(fs)
-	if err := fs.Parse(args); err != nil {
+	cfg, err := loadRuntimeConfig(args)
+	if err != nil {
 		return err
 	}
 
-	return runKVApp(cfg, func(ctx context.Context, app *appcli.App) error {
+	return runKVApp(cfg.runtime, func(ctx context.Context, app *appcli.App) error {
 		if err := app.Sync(ctx); err != nil {
 			return err
 		}
