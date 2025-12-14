@@ -318,3 +318,67 @@ func (m *mockPocketBaseClient) ensureAccount(userID string) {
 		m.accountSet = true
 	}
 }
+
+func TestCleanupPurgesExpiredTokensAndChallenges(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "test.sqlite"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
+
+	srv := &Server{db: db, pbClient: pocketbase.NoopClient{}}
+	if err := srv.migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	now := time.Now().Unix()
+	expired := now - 3600 // 1 hour ago
+	valid := now + 3600   // 1 hour from now
+
+	// Insert expired and valid tokens
+	if _, err := db.Exec(`INSERT INTO tokens(token_hash, user_id, expires_at) VALUES('expired1', 'user1', ?)`, expired); err != nil {
+		t.Fatalf("insert expired token: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO tokens(token_hash, user_id, expires_at) VALUES('valid1', 'user1', ?)`, valid); err != nil {
+		t.Fatalf("insert valid token: %v", err)
+	}
+
+	// Insert expired and valid challenges
+	if _, err := db.Exec(`INSERT INTO challenges(challenge_id, user_id, challenge, expires_at) VALUES('ch-expired', 'user1', X'00', ?)`, expired); err != nil {
+		t.Fatalf("insert expired challenge: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO challenges(challenge_id, user_id, challenge, expires_at) VALUES('ch-valid', 'user1', X'00', ?)`, valid); err != nil {
+		t.Fatalf("insert valid challenge: %v", err)
+	}
+
+	// Run cleanup
+	deleted := srv.cleanupExpired(ctx)
+
+	if deleted.tokens != 1 {
+		t.Errorf("expected 1 expired token deleted, got %d", deleted.tokens)
+	}
+	if deleted.challenges != 1 {
+		t.Errorf("expected 1 expired challenge deleted, got %d", deleted.challenges)
+	}
+
+	// Verify valid records remain
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM tokens`).Scan(&count); err != nil {
+		t.Fatalf("count tokens: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 token remaining, got %d", count)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM challenges`).Scan(&count); err != nil {
+		t.Fatalf("count challenges: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 challenge remaining, got %d", count)
+	}
+}

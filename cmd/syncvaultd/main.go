@@ -53,6 +53,9 @@ func main() {
 		log.Fatal(err)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	srv.startCleanupRoutine(ctx)
+
 	httpSrv := &http.Server{
 		Addr:              addr,
 		Handler:           srv.handler(),
@@ -60,7 +63,10 @@ func main() {
 	}
 
 	log.Printf("syncvaultd listening on %s (db=%s)", addr, dbPath)
-	log.Fatal(httpSrv.ListenAndServe())
+	if err := httpSrv.ListenAndServe(); err != nil {
+		cancel()
+		log.Fatal(err)
+	}
 }
 
 func (s *Server) migrate() error {
