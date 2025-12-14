@@ -123,3 +123,55 @@ func (c *Client) Pull(ctx context.Context, userID string, sinceSeq int64) (PullR
 	var out PullResp
 	return out, json.NewDecoder(resp.Body).Decode(&out)
 }
+
+// PullRespWithSnapshot extends PullResp with optional snapshot.
+type PullRespWithSnapshot struct {
+	Items    []PullItem
+	Snapshot *SnapshotInfo
+}
+
+// SnapshotInfo contains metadata and encrypted payload for a snapshot.
+type SnapshotInfo struct {
+	SnapshotID string   `json:"snapshot_id"`
+	MinSeq     int64    `json:"min_seq"`
+	CreatedAt  int64    `json:"created_at"`
+	Env        Envelope `json:"env"`
+}
+
+// PullWithSnapshot fetches changes with optional snapshot for bootstrap.
+func (c *Client) PullWithSnapshot(ctx context.Context, userID string, since int64, entity string) (PullRespWithSnapshot, error) {
+	url := fmt.Sprintf("%s/v1/sync/pull?user_id=%s&since=%d", c.cfg.BaseURL, userID, since)
+	if entity != "" {
+		url += "&entity=" + entity
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return PullRespWithSnapshot{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.cfg.AuthToken)
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return PullRespWithSnapshot{}, err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		return PullRespWithSnapshot{}, fmt.Errorf("pull failed: %s", resp.Status)
+	}
+
+	var serverResp struct {
+		Items    []PullItem    `json:"items"`
+		Snapshot *SnapshotInfo `json:"snapshot,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&serverResp); err != nil {
+		return PullRespWithSnapshot{}, err
+	}
+
+	return PullRespWithSnapshot{
+		Items:    serverResp.Items,
+		Snapshot: serverResp.Snapshot,
+	}, nil
+}

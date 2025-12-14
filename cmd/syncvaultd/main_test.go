@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -644,5 +646,91 @@ func verifyTokenStatus(t *testing.T, baseURL, token, userID string, expectedStat
 	}()
 	if resp.StatusCode != expectedStatus {
 		t.Fatalf("expected status %d, got %d", expectedStatus, resp.StatusCode)
+	}
+}
+
+func TestSnapshotAndPrune(t *testing.T) {
+	env := newServerTestEnv(t)
+	pushTestChanges(t, env, 5)
+	createTestSnapshot(t, env)
+	verifySnapshotInPull(t, env)
+}
+
+func pushTestChanges(t *testing.T, env *serverTestEnv, count int) {
+	t.Helper()
+	client := vault.NewClient(vault.SyncConfig{BaseURL: env.server.URL, DeviceID: "device-a", AuthToken: env.token})
+	for i := 0; i < count; i++ {
+		change, err := vault.NewChange("todo", fmt.Sprintf("item-%d", i), vault.OpUpsert, map[string]any{"n": i})
+		if err != nil {
+			t.Fatalf("create change: %v", err)
+		}
+		changeBytes, err := json.Marshal(change)
+		if err != nil {
+			t.Fatalf("marshal change: %v", err)
+		}
+		envl, err := vault.Encrypt(env.keys.EncKey, changeBytes, change.AAD(env.userID, "device-a"))
+		if err != nil {
+			t.Fatalf("encrypt change: %v", err)
+		}
+		_, err = client.Push(env.ctx, env.userID, []vault.PushItem{{
+			ChangeID: change.ChangeID,
+			Entity:   change.Entity,
+			TS:       change.TS.Unix(),
+			Env:      envl,
+		}})
+		if err != nil {
+			t.Fatalf("push change %d: %v", i, err)
+		}
+	}
+}
+
+func createTestSnapshot(t *testing.T, env *serverTestEnv) {
+	t.Helper()
+	payload := []byte(`[{"entity_id":"item-0"},{"entity_id":"item-1"}]`)
+	snapshotEnv, err := vault.Encrypt(env.keys.EncKey, payload, []byte("snapshot:"+env.userID+":todo"))
+	if err != nil {
+		t.Fatalf("encrypt snapshot: %v", err)
+	}
+
+	reqBody := map[string]any{
+		"user_id": env.userID,
+		"entity":  "todo",
+		"env":     map[string]string{"nonce_b64": snapshotEnv.NonceB64, "ct_b64": snapshotEnv.CTB64},
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal snapshot req: %v", err)
+	}
+	httpReq, err := http.NewRequest("POST", env.server.URL+"/v1/sync/snapshot", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("create snapshot request: %v", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+env.token)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("snapshot request: %v", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func verifySnapshotInPull(t *testing.T, env *serverTestEnv) {
+	t.Helper()
+	client := vault.NewClient(vault.SyncConfig{BaseURL: env.server.URL, DeviceID: "device-b", AuthToken: env.token})
+	pullResp, err := client.PullWithSnapshot(env.ctx, env.userID, 0, "todo")
+	if err != nil {
+		t.Fatalf("pull with snapshot: %v", err)
+	}
+	if pullResp.Snapshot == nil {
+		t.Fatalf("expected snapshot in response")
+	}
+	if pullResp.Snapshot.MinSeq != 5 {
+		t.Errorf("expected snapshot min_seq=5, got %d", pullResp.Snapshot.MinSeq)
 	}
 }

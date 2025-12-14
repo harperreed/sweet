@@ -72,14 +72,28 @@ func main() {
 }
 
 func (s *Server) migrate() error {
-	_, err := s.db.Exec(`
-PRAGMA journal_mode=WAL;
+	schema := buildSchema()
+	_, err := s.db.Exec(schema)
+	return err
+}
 
+func buildSchema() string {
+	return `
+PRAGMA journal_mode=WAL;
+` + schemaUsers() + schemaDevices() + schemaAuth() + schemaChanges() + schemaSnapshots()
+}
+
+func schemaUsers() string {
+	return `
 CREATE TABLE IF NOT EXISTS users (
   user_id TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL
 );
+`
+}
 
+func schemaDevices() string {
+	return `
 CREATE TABLE IF NOT EXISTS devices (
   device_id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -92,7 +106,11 @@ CREATE TABLE IF NOT EXISTS devices (
 );
 CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);
 CREATE INDEX IF NOT EXISTS idx_devices_fp ON devices(ssh_pubkey_fp);
+`
+}
 
+func schemaAuth() string {
+	return `
 CREATE TABLE IF NOT EXISTS challenges (
   challenge_id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -107,7 +125,13 @@ CREATE TABLE IF NOT EXISTS tokens (
   expires_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tokens_device ON tokens(device_id);
+CREATE INDEX IF NOT EXISTS idx_tokens_user_exp ON tokens(user_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_challenges_user_exp ON challenges(user_id, expires_at);
+`
+}
 
+func schemaChanges() string {
+	return `
 CREATE TABLE IF NOT EXISTS changes (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id TEXT NOT NULL,
@@ -119,12 +143,23 @@ CREATE TABLE IF NOT EXISTS changes (
   ct_b64 TEXT NOT NULL,
   UNIQUE(user_id, change_id)
 );
-
 CREATE INDEX IF NOT EXISTS idx_changes_user_seq ON changes(user_id, seq);
-CREATE INDEX IF NOT EXISTS idx_tokens_user_exp ON tokens(user_id, expires_at);
-CREATE INDEX IF NOT EXISTS idx_challenges_user_exp ON challenges(user_id, expires_at);
-`)
-	return err
+`
+}
+
+func schemaSnapshots() string {
+	return `
+CREATE TABLE IF NOT EXISTS snapshots (
+  snapshot_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  entity TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  min_seq INTEGER NOT NULL,
+  nonce_b64 TEXT NOT NULL,
+  ct_b64 TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_snapshots_user_entity ON snapshots(user_id, entity, created_at DESC);
+`
 }
 
 func (s *Server) handler() http.Handler {
@@ -135,6 +170,8 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/v1/auth/verify", s.handleVerify)
 	mux.HandleFunc("/v1/sync/push", s.withAuth(s.handlePush))
 	mux.HandleFunc("/v1/sync/pull", s.withAuth(s.handlePull))
+	mux.HandleFunc("/v1/sync/snapshot", s.withAuth(s.handleSnapshot))
+	mux.HandleFunc("/v1/sync/compact", s.withAuth(s.handleCompact))
 	mux.HandleFunc("/v1/devices", s.withAuth(s.handleListDevices))
 	mux.HandleFunc("/v1/devices/", s.withAuth(s.handleRevokeDevice))
 	return withJSON(withLogging(mux))
@@ -552,7 +589,8 @@ VALUES(?,?,?,?,?,?,?)
 }
 
 type pullResp struct {
-	Items []pullItem `json:"items"`
+	Items    []pullItem    `json:"items"`
+	Snapshot *snapshotInfo `json:"snapshot,omitempty"`
 }
 
 type pullItem struct {
@@ -571,23 +609,60 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	}
 	authUser := r.Context().Value(ctxUserIDKey{}).(string)
 
-	userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
-	sinceStr := strings.TrimSpace(r.URL.Query().Get("since"))
-	if userID == "" || sinceStr == "" {
-		fail(w, http.StatusBadRequest, "user_id and since required")
+	userID, since, entity, err := parsePullParams(r)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if userID != authUser {
 		fail(w, http.StatusForbidden, "token user mismatch")
 		return
 	}
-	since, err := strconv.ParseInt(sinceStr, 10, 64)
-	if err != nil || since < 0 {
-		fail(w, http.StatusBadRequest, "invalid since")
+
+	resp, err := s.buildPullResponse(r.Context(), userID, since, entity)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	ok(w, resp)
+}
 
-	rows, err := s.db.QueryContext(r.Context(), `
+func parsePullParams(r *http.Request) (userID string, since int64, entity string, err error) {
+	userID = strings.TrimSpace(r.URL.Query().Get("user_id"))
+	sinceStr := strings.TrimSpace(r.URL.Query().Get("since"))
+	if userID == "" || sinceStr == "" {
+		return "", 0, "", errors.New("user_id and since required")
+	}
+	since, err = strconv.ParseInt(sinceStr, 10, 64)
+	if err != nil || since < 0 {
+		return "", 0, "", errors.New("invalid since")
+	}
+	entity = strings.TrimSpace(r.URL.Query().Get("entity"))
+	return userID, since, entity, nil
+}
+
+func (s *Server) buildPullResponse(ctx context.Context, userID string, since int64, entity string) (pullResp, error) {
+	resp := pullResp{}
+
+	// Include snapshot if pulling from 0 with entity specified
+	if since == 0 && entity != "" {
+		snapshot, err := s.getLatestSnapshot(ctx, userID, entity)
+		if err == nil && snapshot != nil {
+			resp.Snapshot = snapshot
+			since = snapshot.MinSeq
+		}
+	}
+
+	items, err := s.queryChanges(ctx, userID, since)
+	if err != nil {
+		return pullResp{}, err
+	}
+	resp.Items = items
+	return resp, nil
+}
+
+func (s *Server) queryChanges(ctx context.Context, userID string, since int64) ([]pullItem, error) {
+	rows, err := s.db.QueryContext(ctx, `
 SELECT seq, change_id, device_id, entity, ts, nonce_b64, ct_b64
 FROM changes
 WHERE user_id = ? AND seq > ?
@@ -595,28 +670,21 @@ ORDER BY seq ASC
 LIMIT 500
 `, userID, since)
 	if err != nil {
-		fail(w, http.StatusInternalServerError, "db error")
-		return
+		return nil, err
 	}
 	defer func() {
 		_ = rows.Close()
 	}()
 
-	resp := pullResp{}
+	var items []pullItem
 	for rows.Next() {
 		var it pullItem
 		if err := rows.Scan(&it.Seq, &it.ChangeID, &it.DeviceID, &it.Entity, &it.TS, &it.Env.NonceB64, &it.Env.CTB64); err != nil {
-			fail(w, http.StatusInternalServerError, "db error")
-			return
+			return nil, err
 		}
-		resp.Items = append(resp.Items, it)
+		items = append(items, it)
 	}
-	if err := rows.Err(); err != nil {
-		fail(w, http.StatusInternalServerError, "db error")
-		return
-	}
-
-	ok(w, resp)
+	return items, rows.Err()
 }
 
 // helpers
