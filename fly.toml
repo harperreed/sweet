@@ -1,0 +1,15 @@
+app = "suite-sync"
+primary_region = "iad"
+kill_signal = "SIGINT"
+kill_timeout = "5s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  ADDR = "0.0.0.0:8080"
+  DB_PATH = "/data/syncvault.sqlite"
+
+[[mounts]]
+  source = "vault_data"
+  destination = "/data"
