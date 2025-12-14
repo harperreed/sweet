@@ -33,6 +33,7 @@ type serverTestEnv struct {
 	ctx    context.Context
 	dir    string
 	server *httptest.Server
+	srv    *Server
 	keys   vault.Keys
 	userID string
 	token  string
@@ -46,7 +47,11 @@ func newServerTestEnvWithPB(t *testing.T, pb pocketbase.Client) *serverTestEnv {
 	ctx := context.Background()
 	dir := t.TempDir()
 	db := openTestDatabase(t, filepath.Join(dir, "syncvault.sqlite"))
-	srv := &Server{db: db, pbClient: pb}
+	srv := &Server{
+		db:       db,
+		pbClient: pb,
+		limiters: newRateLimiterStore(DefaultRateLimitConfig()),
+	}
 	migrateServer(t, srv)
 	ts := startTestServer(t, srv)
 	keys, signer := generateKeysAndSigner(t)
@@ -60,6 +65,7 @@ func newServerTestEnvWithPB(t *testing.T, pb pocketbase.Client) *serverTestEnv {
 		ctx:    ctx,
 		dir:    dir,
 		server: ts,
+		srv:    srv,
 		keys:   keys,
 		userID: keys.UserID(),
 		token:  token,
@@ -319,6 +325,10 @@ func (m *mockPocketBaseClient) ensureAccount(userID string) {
 	}
 }
 
+func (e *serverTestEnv) setRateLimit(interval time.Duration, burst int) {
+	e.srv.limiters.setConfig(interval, burst)
+}
+
 func TestCleanupPurgesExpiredTokensAndChallenges(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -380,5 +390,42 @@ func TestCleanupPurgesExpiredTokensAndChallenges(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("expected 1 challenge remaining, got %d", count)
+	}
+}
+
+func TestRateLimitRejects429(t *testing.T) {
+	env := newServerTestEnv(t)
+
+	// Configure tight rate limit for testing: 1 request per second, burst of 1
+	env.setRateLimit(time.Second, 1)
+
+	client := &http.Client{}
+
+	// First request should succeed
+	req1, _ := http.NewRequest("GET", env.server.URL+"/v1/sync/pull?user_id="+env.userID+"&since=0", nil)
+	req1.Header.Set("Authorization", "Bearer "+env.token)
+	resp1, err := client.Do(req1)
+	if err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	if err := resp1.Body.Close(); err != nil {
+		t.Fatalf("close resp1 body: %v", err)
+	}
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("first request expected 200, got %d", resp1.StatusCode)
+	}
+
+	// Rapid second request should be rate limited
+	req2, _ := http.NewRequest("GET", env.server.URL+"/v1/sync/pull?user_id="+env.userID+"&since=0", nil)
+	req2.Header.Set("Authorization", "Bearer "+env.token)
+	resp2, err := client.Do(req2)
+	if err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	if err := resp2.Body.Close(); err != nil {
+		t.Fatalf("close resp2 body: %v", err)
+	}
+	if resp2.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second request expected 429, got %d", resp2.StatusCode)
 	}
 }

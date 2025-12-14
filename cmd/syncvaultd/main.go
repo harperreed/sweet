@@ -28,6 +28,7 @@ import (
 type Server struct {
 	db       *sql.DB
 	pbClient pocketbase.Client
+	limiters *rateLimiterStore
 }
 
 func main() {
@@ -48,6 +49,7 @@ func main() {
 	srv := &Server{
 		db:       db,
 		pbClient: pbClient,
+		limiters: newRateLimiterStore(DefaultRateLimitConfig()),
 	}
 	if err := srv.migrate(); err != nil {
 		log.Fatal(err)
@@ -334,6 +336,16 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			fail(w, http.StatusUnauthorized, err.Error())
 			return
 		}
+
+		// Rate limit check
+		if s.limiters != nil {
+			limiter := s.limiters.get(userID)
+			if !limiter.Allow() {
+				fail(w, http.StatusTooManyRequests, "rate limit exceeded")
+				return
+			}
+		}
+
 		ctx := context.WithValue(r.Context(), ctxUserIDKey{}, userID)
 		next(w, r.WithContext(ctx))
 	}
