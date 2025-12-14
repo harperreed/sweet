@@ -1,0 +1,31 @@
+# Compiled binaries (in root directory only)
+/syncvaultd
+/sweet
+/auth
+/notes
+/todo
+/logger
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+*.out
+
+# Go workspace file
+go.work
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

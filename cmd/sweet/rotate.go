@@ -274,7 +274,7 @@ func reencryptChanges(items []vault.PullItem, oldKeys, newKeys vault.Keys, newUs
 			return nil, fmt.Errorf("marshal change: %w", err)
 		}
 
-		newAAD := change.AAD(newUserID, "rotation-device")
+		newAAD := change.AAD(newUserID, item.DeviceID)
 		newEnv, err := vault.Encrypt(newKeys.EncKey, newChangeBytes, newAAD)
 		if err != nil {
 			return nil, fmt.Errorf("encrypt change: %w", err)
