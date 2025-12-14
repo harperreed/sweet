@@ -651,9 +651,52 @@ func verifyTokenStatus(t *testing.T, baseURL, token, userID string, expectedStat
 
 func TestSnapshotAndPrune(t *testing.T) {
 	env := newServerTestEnv(t)
+	// Disable rate limiting for this test to avoid 429 errors
+	env.setRateLimit(0, 1000)
 	pushTestChanges(t, env, 5)
 	createTestSnapshot(t, env)
 	verifySnapshotInPull(t, env)
+	testCompaction(t, env)
+}
+
+func testCompaction(t *testing.T, env *serverTestEnv) {
+	t.Helper()
+
+	// Get the snapshot's min_seq (should be 5 after pushing 5 changes)
+	var snapshotMinSeq int64
+	if err := env.srv.db.QueryRow(`SELECT min_seq FROM snapshots WHERE user_id=? AND entity=? ORDER BY created_at DESC LIMIT 1`, env.userID, "todo").Scan(&snapshotMinSeq); err != nil {
+		t.Fatalf("query snapshot min_seq: %v", err)
+	}
+	if snapshotMinSeq != 5 {
+		t.Fatalf("expected snapshot min_seq=5, got %d", snapshotMinSeq)
+	}
+
+	// Push 3 more changes after snapshot (will be seq 6, 7, 8)
+	pushTestChanges(t, env, 3)
+
+	// Call compact endpoint
+	client := vault.NewClient(vault.SyncConfig{BaseURL: env.server.URL, DeviceID: "device-a", AuthToken: env.token})
+	if err := client.Compact(env.ctx, env.userID, "todo"); err != nil {
+		t.Fatalf("compact failed: %v", err)
+	}
+
+	// Verify old changes (seq < 5) were deleted
+	var oldCount int
+	if err := env.srv.db.QueryRow(`SELECT COUNT(*) FROM changes WHERE user_id=? AND entity=? AND seq < ?`, env.userID, "todo", snapshotMinSeq).Scan(&oldCount); err != nil {
+		t.Fatalf("query old changes: %v", err)
+	}
+	if oldCount != 0 {
+		t.Errorf("expected 0 old changes (seq < %d), got %d", snapshotMinSeq, oldCount)
+	}
+
+	// Verify changes at boundary and newer (seq >= 5) still exist (5, 6, 7, 8 = 4 changes)
+	var newCount int
+	if err := env.srv.db.QueryRow(`SELECT COUNT(*) FROM changes WHERE user_id=? AND entity=? AND seq >= ?`, env.userID, "todo", snapshotMinSeq).Scan(&newCount); err != nil {
+		t.Fatalf("query new changes: %v", err)
+	}
+	if newCount != 4 {
+		t.Errorf("expected 4 changes (seq >= %d), got %d", snapshotMinSeq, newCount)
+	}
 }
 
 func pushTestChanges(t *testing.T, env *serverTestEnv, count int) {

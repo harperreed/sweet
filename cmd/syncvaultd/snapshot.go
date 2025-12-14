@@ -46,9 +46,19 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Use transaction to prevent race conditions
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
 	// Get current max seq for this user/entity
 	var maxSeq int64
-	err := s.db.QueryRowContext(r.Context(), `
+	err = tx.QueryRowContext(r.Context(), `
 SELECT COALESCE(MAX(seq), 0) FROM changes WHERE user_id=? AND entity=?
 `, req.UserID, req.Entity).Scan(&maxSeq)
 	if err != nil {
@@ -59,10 +69,15 @@ SELECT COALESCE(MAX(seq), 0) FROM changes WHERE user_id=? AND entity=?
 	snapshotID := randHex(16)
 	now := time.Now().Unix()
 
-	if _, err := s.db.ExecContext(r.Context(), `
+	if _, err := tx.ExecContext(r.Context(), `
 INSERT INTO snapshots(snapshot_id, user_id, entity, created_at, min_seq, nonce_b64, ct_b64)
 VALUES(?,?,?,?,?,?,?)
 `, snapshotID, req.UserID, req.Entity, now, maxSeq, req.Env.NonceB64, req.Env.CTB64); err != nil {
+		fail(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
 		fail(w, http.StatusInternalServerError, "db error")
 		return
 	}
@@ -105,20 +120,17 @@ func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get oldest snapshot's min_seq
-	var minSeq int64
-	err := s.db.QueryRowContext(r.Context(), `
-SELECT MIN(min_seq) FROM snapshots WHERE user_id=? AND entity=?
-`, authUser, entity).Scan(&minSeq)
+	// Get latest snapshot's min_seq
+	snapshot, err := s.getLatestSnapshot(r.Context(), authUser, entity)
 	if err != nil {
-		fail(w, http.StatusInternalServerError, "no snapshot found")
+		fail(w, http.StatusNotFound, "no snapshot found")
 		return
 	}
 
-	// Delete changes older than snapshot
+	// Delete changes older than snapshot (exclusive boundary)
 	res, err := s.db.ExecContext(r.Context(), `
-DELETE FROM changes WHERE user_id=? AND entity=? AND seq <= ?
-`, authUser, entity, minSeq)
+DELETE FROM changes WHERE user_id=? AND entity=? AND seq < ?
+`, authUser, entity, snapshot.MinSeq)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "db error")
 		return

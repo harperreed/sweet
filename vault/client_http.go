@@ -175,3 +175,27 @@ func (c *Client) PullWithSnapshot(ctx context.Context, userID string, since int6
 		Snapshot: serverResp.Snapshot,
 	}, nil
 }
+
+// Compact triggers server-side compaction of old changes for the given entity.
+func (c *Client) Compact(ctx context.Context, userID, entity string) error {
+	url := fmt.Sprintf("%s/v1/sync/compact?entity=%s", c.cfg.BaseURL, entity)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.cfg.AuthToken)
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("compact failed: %s", resp.Status)
+	}
+
+	return nil
+}
