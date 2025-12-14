@@ -77,10 +77,21 @@ PRAGMA journal_mode=WAL;
 
 CREATE TABLE IF NOT EXISTS users (
   user_id TEXT PRIMARY KEY,
-  ssh_pubkey TEXT NOT NULL,
-  ssh_pubkey_fp TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS devices (
+  device_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  ssh_pubkey TEXT NOT NULL,
+  ssh_pubkey_fp TEXT NOT NULL,
+  name TEXT,
+  created_at INTEGER NOT NULL,
+  last_used_at INTEGER,
+  UNIQUE(ssh_pubkey_fp)
+);
+CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);
+CREATE INDEX IF NOT EXISTS idx_devices_fp ON devices(ssh_pubkey_fp);
 
 CREATE TABLE IF NOT EXISTS challenges (
   challenge_id TEXT PRIMARY KEY,
@@ -92,6 +103,7 @@ CREATE TABLE IF NOT EXISTS challenges (
 CREATE TABLE IF NOT EXISTS tokens (
   token_hash TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
+  device_id TEXT,
   expires_at INTEGER NOT NULL
 );
 
@@ -122,6 +134,8 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/v1/auth/verify", s.handleVerify)
 	mux.HandleFunc("/v1/sync/push", s.withAuth(s.handlePush))
 	mux.HandleFunc("/v1/sync/pull", s.withAuth(s.handlePull))
+	mux.HandleFunc("/v1/devices", s.withAuth(s.handleListDevices))
+	mux.HandleFunc("/v1/devices/", s.withAuth(s.handleRevokeDevice))
 	return withJSON(withLogging(mux))
 }
 
@@ -130,6 +144,8 @@ func (s *Server) handler() http.Handler {
 type registerReq struct {
 	UserID        string `json:"user_id"`
 	SSHPubkeyOpen string `json:"ssh_pubkey_openssh"`
+	DeviceID      string `json:"device_id,omitempty"`
+	DeviceName    string `json:"device_name,omitempty"`
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -156,18 +172,33 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	fp := ssh.FingerprintSHA256(pub)
 
-	if _, err := s.db.Exec(`
-INSERT INTO users(user_id, ssh_pubkey, ssh_pubkey_fp, created_at)
-VALUES(?,?,?,?)
-ON CONFLICT(user_id) DO UPDATE SET
-  ssh_pubkey=excluded.ssh_pubkey,
-  ssh_pubkey_fp=excluded.ssh_pubkey_fp
-`, req.UserID, req.SSHPubkeyOpen, fp, time.Now().Unix()); err != nil {
+	// Generate device_id if not provided
+	deviceID := req.DeviceID
+	if deviceID == "" {
+		deviceID = randHex(16)
+	}
+
+	now := time.Now().Unix()
+
+	// Ensure user exists
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO users(user_id, created_at) VALUES(?,?)`, req.UserID, now); err != nil {
 		fail(w, http.StatusInternalServerError, "db error")
 		return
 	}
 
-	ok(w, map[string]any{"ok": true, "ssh_fp": fp})
+	// Insert or update device (by fingerprint to handle re-registration of same key)
+	if _, err := s.db.Exec(`
+INSERT INTO devices(device_id, user_id, ssh_pubkey, ssh_pubkey_fp, name, created_at)
+VALUES(?,?,?,?,?,?)
+ON CONFLICT(ssh_pubkey_fp) DO UPDATE SET
+  name=COALESCE(excluded.name, devices.name),
+  ssh_pubkey=excluded.ssh_pubkey
+`, deviceID, req.UserID, req.SSHPubkeyOpen, fp, req.DeviceName, now); err != nil {
+		fail(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	ok(w, map[string]any{"ok": true, "ssh_fp": fp, "device_id": deviceID})
 }
 
 // challenge
@@ -287,14 +318,6 @@ func (s *Server) processVerify(ctx context.Context, req verifyReq) (verifyResp, 
 		return verifyResp{}, http.StatusForbidden, errors.New("account inactive")
 	}
 
-	pub, err := s.fetchUserPublicKey(req.UserID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return verifyResp{}, http.StatusNotFound, errors.New("unknown user_id")
-		}
-		return verifyResp{}, http.StatusInternalServerError, errors.New("db error")
-	}
-
 	challenge, expires, err := s.loadChallenge(req.UserID, req.ChallengeID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -310,19 +333,61 @@ func (s *Server) processVerify(ctx context.Context, req verifyReq) (verifyResp, 
 	if err != nil {
 		return verifyResp{}, http.StatusBadRequest, err
 	}
-	if err := pub.Verify(challenge, sig); err != nil {
+
+	// Find device that can verify this signature
+	deviceID, _, err := s.findDeviceForSignature(req.UserID, challenge, sig)
+	if err != nil {
 		return verifyResp{}, http.StatusUnauthorized, errors.New("signature verification failed")
 	}
 
+	// Delete used challenge
 	if _, err := s.db.Exec(`DELETE FROM challenges WHERE challenge_id=?`, req.ChallengeID); err != nil {
 		return verifyResp{}, http.StatusInternalServerError, errors.New("db error")
 	}
 
-	resp, err := s.issueToken(req.UserID)
+	// Update last_used_at
+	_, _ = s.db.Exec(`UPDATE devices SET last_used_at=? WHERE device_id=?`, time.Now().Unix(), deviceID)
+
+	resp, err := s.issueTokenForDevice(req.UserID, deviceID)
 	if err != nil {
 		return verifyResp{}, http.StatusInternalServerError, errors.New("db error")
 	}
 	return resp, http.StatusOK, nil
+}
+
+func (s *Server) findDeviceForSignature(userID string, challenge []byte, sig *ssh.Signature) (string, ssh.PublicKey, error) {
+	rows, err := s.db.Query(`SELECT device_id, ssh_pubkey FROM devices WHERE user_id=?`, userID)
+	if err != nil {
+		return "", nil, err
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	for rows.Next() {
+		var deviceID, pubStr string
+		if err := rows.Scan(&deviceID, &pubStr); err != nil {
+			continue
+		}
+		pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubStr))
+		if err != nil {
+			continue
+		}
+		if err := pub.Verify(challenge, sig); err == nil {
+			return deviceID, pub, nil
+		}
+	}
+	return "", nil, errors.New("no matching device")
+}
+
+func (s *Server) issueTokenForDevice(userID, deviceID string) (verifyResp, error) {
+	token := "sv_" + randHex(32)
+	tokenHash := hashToken(token)
+	exp := time.Now().Add(12 * time.Hour).Unix()
+	if _, err := s.db.Exec(`INSERT INTO tokens(token_hash, user_id, device_id, expires_at) VALUES(?,?,?,?)`, tokenHash, userID, deviceID, exp); err != nil {
+		return verifyResp{}, err
+	}
+	return verifyResp{Token: token, ExpiresUnix: exp}, nil
 }
 
 // auth middleware
@@ -616,18 +681,6 @@ func initPocketBaseClient() pocketbase.Client {
 	}
 }
 
-func (s *Server) fetchUserPublicKey(userID string) (ssh.PublicKey, error) {
-	var pubStr string
-	if err := s.db.QueryRow(`SELECT ssh_pubkey FROM users WHERE user_id=?`, userID).Scan(&pubStr); err != nil {
-		return nil, err
-	}
-	pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubStr))
-	if err != nil {
-		return nil, err
-	}
-	return pub, nil
-}
-
 func (s *Server) loadChallenge(userID, challengeID string) ([]byte, int64, error) {
 	var ch []byte
 	var expires int64
@@ -645,14 +698,4 @@ func parseSignature(sigB64 string) (*ssh.Signature, error) {
 		return nil, errors.New("invalid signature encoding")
 	}
 	return sig, nil
-}
-
-func (s *Server) issueToken(userID string) (verifyResp, error) {
-	token := "sv_" + randHex(32)
-	tokenHash := hashToken(token)
-	exp := time.Now().Add(12 * time.Hour).Unix()
-	if _, err := s.db.Exec(`INSERT INTO tokens(token_hash, user_id, expires_at) VALUES(?,?,?)`, tokenHash, userID, exp); err != nil {
-		return verifyResp{}, err
-	}
-	return verifyResp{Token: token, ExpiresUnix: exp}, nil
 }

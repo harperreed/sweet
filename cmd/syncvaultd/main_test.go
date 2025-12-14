@@ -226,53 +226,17 @@ func TestPushIncrementsPocketBaseUsage(t *testing.T) {
 func TestVerifyFailsWhenPocketBaseInactive(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "syncvault.sqlite"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = db.Close()
-	})
+	db := openTestDatabase(t, filepath.Join(dir, "syncvault.sqlite"))
 
 	pb := &mockPocketBaseClient{
-		account: pocketbase.AccountInfo{
-			Active: false,
-		},
+		account:    pocketbase.AccountInfo{Active: false},
 		accountSet: true,
 	}
 
 	srv := &Server{db: db, pbClient: pb}
-	if err := srv.migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	migrateServer(t, srv)
 
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	signer, err := ssh.NewSignerFromKey(priv)
-	if err != nil {
-		t.Fatalf("signer: %v", err)
-	}
-	pubStr := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
-	fp := ssh.FingerprintSHA256(signer.PublicKey())
-	userID := "user-test"
-
-	if _, err := db.Exec(`INSERT INTO users(user_id, ssh_pubkey, ssh_pubkey_fp, created_at) VALUES(?,?,?,?)`,
-		userID, pubStr, fp, time.Now().Unix()); err != nil {
-		t.Fatalf("insert user: %v", err)
-	}
-	chID := "challenge-1"
-	challenge := []byte("challenge-bytes")
-	if _, err := db.Exec(`INSERT INTO challenges(challenge_id, user_id, challenge, expires_at) VALUES(?,?,?,?)`,
-		chID, userID, challenge, time.Now().Add(time.Minute).Unix()); err != nil {
-		t.Fatalf("insert challenge: %v", err)
-	}
-	sig, err := signer.Sign(rand.Reader, challenge)
-	if err != nil {
-		t.Fatalf("sign: %v", err)
-	}
-	sigB64 := base64.StdEncoding.EncodeToString(ssh.Marshal(sig))
+	userID, chID, sigB64 := setupTestDeviceAndChallenge(t, db)
 
 	resp, status, err := srv.processVerify(ctx, verifyReq{
 		UserID:       userID,
@@ -282,6 +246,36 @@ func TestVerifyFailsWhenPocketBaseInactive(t *testing.T) {
 	if err == nil || status != http.StatusForbidden {
 		t.Fatalf("expected forbidden from pocketbase denial, got status=%d err=%v resp=%+v", status, err, resp)
 	}
+}
+
+func setupTestDeviceAndChallenge(t *testing.T, db *sql.DB) (userID, chID, sigB64 string) {
+	t.Helper()
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	signer, _ := ssh.NewSignerFromKey(priv)
+	pubStr := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	fp := ssh.FingerprintSHA256(signer.PublicKey())
+	userID = "user-test"
+	deviceID := "device-test"
+	now := time.Now().Unix()
+
+	if _, err := db.Exec(`INSERT INTO users(user_id, created_at) VALUES(?,?)`, userID, now); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO devices(device_id, user_id, ssh_pubkey, ssh_pubkey_fp, name, created_at) VALUES(?,?,?,?,?,?)`,
+		deviceID, userID, pubStr, fp, "test-device", now); err != nil {
+		t.Fatalf("insert device: %v", err)
+	}
+
+	chID = "challenge-1"
+	challenge := []byte("challenge-bytes")
+	if _, err := db.Exec(`INSERT INTO challenges(challenge_id, user_id, challenge, expires_at) VALUES(?,?,?,?)`,
+		chID, userID, challenge, time.Now().Add(time.Minute).Unix()); err != nil {
+		t.Fatalf("insert challenge: %v", err)
+	}
+
+	sig, _ := signer.Sign(rand.Reader, challenge)
+	sigB64 = base64.StdEncoding.EncodeToString(ssh.Marshal(sig))
+	return userID, chID, sigB64
 }
 
 type mockPocketBaseClient struct {
@@ -427,5 +421,124 @@ func TestRateLimitRejects429(t *testing.T) {
 	}
 	if resp2.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("second request expected 429, got %d", resp2.StatusCode)
+	}
+}
+
+func TestMultipleDevicesCanAuthenticate(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db := openTestDatabase(t, filepath.Join(dir, "syncvault.sqlite"))
+	srv := &Server{
+		db:       db,
+		pbClient: pocketbase.NoopClient{},
+		limiters: newRateLimiterStore(DefaultRateLimitConfig()),
+	}
+	migrateServer(t, srv)
+	ts := startTestServer(t, srv)
+
+	keys, _ := generateKeysAndSigner(t)
+	userID := keys.UserID()
+
+	// Register device A
+	_, privA, _ := ed25519.GenerateKey(rand.Reader)
+	signerA, _ := ssh.NewSignerFromKey(privA)
+	tokenA := registerAndLogin(t, ts.URL, ctx, userID, signerA, "device-a")
+
+	// Register device B (should NOT invalidate device A)
+	_, privB, _ := ed25519.GenerateKey(rand.Reader)
+	signerB, _ := ssh.NewSignerFromKey(privB)
+	tokenB := registerAndLogin(t, ts.URL, ctx, userID, signerB, "device-b")
+
+	// Both tokens should work
+	client := &http.Client{}
+
+	reqA, _ := http.NewRequest("GET", ts.URL+"/v1/sync/pull?user_id="+userID+"&since=0", nil)
+	reqA.Header.Set("Authorization", "Bearer "+tokenA)
+	respA, err := client.Do(reqA)
+	if err != nil {
+		t.Fatalf("device A request: %v", err)
+	}
+	if err := respA.Body.Close(); err != nil {
+		t.Fatalf("close respA body: %v", err)
+	}
+	if respA.StatusCode != http.StatusOK {
+		t.Fatalf("device A expected 200, got %d", respA.StatusCode)
+	}
+
+	reqB, _ := http.NewRequest("GET", ts.URL+"/v1/sync/pull?user_id="+userID+"&since=0", nil)
+	reqB.Header.Set("Authorization", "Bearer "+tokenB)
+	respB, err := client.Do(reqB)
+	if err != nil {
+		t.Fatalf("device B request: %v", err)
+	}
+	if err := respB.Body.Close(); err != nil {
+		t.Fatalf("close respB body: %v", err)
+	}
+	if respB.StatusCode != http.StatusOK {
+		t.Fatalf("device B expected 200, got %d", respB.StatusCode)
+	}
+}
+
+func registerAndLogin(t *testing.T, baseURL string, ctx context.Context, userID string, signer ssh.Signer, deviceName string) string {
+	authClient := vault.NewAuthClient(baseURL)
+
+	// Register with device name
+	pubStr := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	if err := authClient.RegisterAuthorizedKeyWithDevice(ctx, userID, pubStr, deviceName); err != nil {
+		t.Fatalf("register %s: %v", deviceName, err)
+	}
+
+	// Get challenge and login
+	ch, err := authClient.Challenge(ctx, userID)
+	if err != nil {
+		t.Fatalf("challenge %s: %v", deviceName, err)
+	}
+	sig, _ := signer.Sign(rand.Reader, ch.Data)
+	sigB64 := base64.StdEncoding.EncodeToString(ssh.Marshal(sig))
+	token, err := authClient.Verify(ctx, userID, ch.ID, sigB64)
+	if err != nil {
+		t.Fatalf("verify %s: %v", deviceName, err)
+	}
+	return token.Token
+}
+
+func TestListDevices(t *testing.T) {
+	env := newServerTestEnv(t)
+
+	// Register a second device
+	_, privB, _ := ed25519.GenerateKey(rand.Reader)
+	signerB, _ := ssh.NewSignerFromKey(privB)
+	registerAndLogin(t, env.server.URL, env.ctx, env.userID, signerB, "second-device")
+
+	// List devices
+	client := &http.Client{}
+	req, _ := http.NewRequest("GET", env.server.URL+"/v1/devices", nil)
+	req.Header.Set("Authorization", "Bearer "+env.token)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("list devices: %v", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("close resp body: %v", err)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body struct {
+		Devices []struct {
+			DeviceID string `json:"device_id"`
+			Name     string `json:"name"`
+		} `json:"devices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if len(body.Devices) != 2 {
+		t.Fatalf("expected 2 devices, got %d", len(body.Devices))
 	}
 }

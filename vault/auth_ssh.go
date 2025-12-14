@@ -70,7 +70,7 @@ func (c *AuthClient) RegisterAuthorizedKey(ctx context.Context, userID, authoriz
 		UserID:        userID,
 		SSHPubkeyOpen: authorizedKey,
 	}
-	resp, err := c.doJSON(ctx, http.MethodPost, "/v1/auth/register", req)
+	resp, err := c.doJSON(ctx, "/v1/auth/register", req)
 	if err != nil {
 		return err
 	}
@@ -81,6 +81,31 @@ func (c *AuthClient) RegisterAuthorizedKey(ctx context.Context, userID, authoriz
 		return err
 	}
 	return nil
+}
+
+// RegisterAuthorizedKeyWithDevice registers a key with an optional device name.
+func (c *AuthClient) RegisterAuthorizedKeyWithDevice(ctx context.Context, userID, authorizedKey, deviceName string) error {
+	authorizedKey = strings.TrimSpace(authorizedKey)
+	if authorizedKey == "" {
+		return errors.New("authorized key required")
+	}
+	req := struct {
+		UserID        string `json:"user_id"`
+		SSHPubkeyOpen string `json:"ssh_pubkey_openssh"`
+		DeviceName    string `json:"device_name,omitempty"`
+	}{
+		UserID:        userID,
+		SSHPubkeyOpen: authorizedKey,
+		DeviceName:    deviceName,
+	}
+	resp, err := c.doJSON(ctx, "/v1/auth/register", req)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("register failed: %s", decodeError(resp))
+	}
+	return resp.Body.Close()
 }
 
 // LoginWithKeyFile registers (if autoRegister) and signs challenge with key file.
@@ -119,7 +144,7 @@ func (c *AuthClient) Challenge(ctx context.Context, userID string) (Challenge, e
 	req := struct {
 		UserID string `json:"user_id"`
 	}{UserID: userID}
-	resp, err := c.doJSON(ctx, http.MethodPost, "/v1/auth/challenge", req)
+	resp, err := c.doJSON(ctx, "/v1/auth/challenge", req)
 	if err != nil {
 		return Challenge{}, err
 	}
@@ -159,7 +184,7 @@ func (c *AuthClient) Verify(ctx context.Context, userID, challengeID, signatureB
 		ChallengeID:  challengeID,
 		SignatureB64: signatureB64,
 	}
-	resp, err := c.doJSON(ctx, http.MethodPost, "/v1/auth/verify", req)
+	resp, err := c.doJSON(ctx, "/v1/auth/verify", req)
 	if err != nil {
 		return AuthToken{}, err
 	}
@@ -183,7 +208,7 @@ func (c *AuthClient) registerWithSigner(ctx context.Context, userID string, sign
 	return c.RegisterAuthorizedKey(ctx, userID, pub)
 }
 
-func (c *AuthClient) doJSON(ctx context.Context, method, path string, body any) (*http.Response, error) {
+func (c *AuthClient) doJSON(ctx context.Context, path string, body any) (*http.Response, error) {
 	var reader *bytes.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -195,7 +220,7 @@ func (c *AuthClient) doJSON(ctx context.Context, method, path string, body any) 
 		reader = bytes.NewReader(nil)
 	}
 	url := c.baseURL + path
-	req, err := http.NewRequestWithContext(ctx, method, url, reader)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, reader)
 	if err != nil {
 		return nil, err
 	}
