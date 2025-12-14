@@ -542,3 +542,107 @@ func TestListDevices(t *testing.T) {
 		t.Fatalf("expected 2 devices, got %d", len(body.Devices))
 	}
 }
+
+func TestRevokeDevice(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db := openTestDatabase(t, filepath.Join(dir, "syncvault.sqlite"))
+	srv := &Server{
+		db:       db,
+		pbClient: pocketbase.NoopClient{},
+		limiters: newRateLimiterStore(DefaultRateLimitConfig()),
+	}
+	migrateServer(t, srv)
+	ts := startTestServer(t, srv)
+
+	keys, _ := generateKeysAndSigner(t)
+	userID := keys.UserID()
+
+	// Register device A and B
+	_, privA, _ := ed25519.GenerateKey(rand.Reader)
+	signerA, _ := ssh.NewSignerFromKey(privA)
+	tokenA := registerAndLogin(t, ts.URL, ctx, userID, signerA, "device-a")
+
+	_, privB, _ := ed25519.GenerateKey(rand.Reader)
+	signerB, _ := ssh.NewSignerFromKey(privB)
+	tokenB := registerAndLogin(t, ts.URL, ctx, userID, signerB, "device-b")
+
+	// Get device B's ID
+	deviceBID := getSecondDeviceID(t, ts.URL, tokenB)
+
+	// Revoke device B using device A's token
+	revokeDevice(t, ts.URL, tokenA, deviceBID)
+
+	// Verify device B token no longer works (401)
+	verifyTokenStatus(t, ts.URL, tokenB, userID, http.StatusUnauthorized)
+
+	// Verify device A token still works (200)
+	verifyTokenStatus(t, ts.URL, tokenA, userID, http.StatusOK)
+}
+
+func getSecondDeviceID(t *testing.T, baseURL, token string) string {
+	t.Helper()
+	client := &http.Client{}
+	req, _ := http.NewRequest("GET", baseURL+"/v1/devices", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("list devices: %v", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("close response: %v", err)
+		}
+	}()
+
+	var body struct {
+		Devices []struct {
+			DeviceID string `json:"device_id"`
+		} `json:"devices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(body.Devices) != 2 {
+		t.Fatalf("expected 2 devices, got %d", len(body.Devices))
+	}
+	return body.Devices[1].DeviceID
+}
+
+func revokeDevice(t *testing.T, baseURL, token, deviceID string) {
+	t.Helper()
+	client := &http.Client{}
+	req, _ := http.NewRequest("DELETE", baseURL+"/v1/devices/"+deviceID, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("revoke device: %v", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("close response: %v", err)
+		}
+	}()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("revoke expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func verifyTokenStatus(t *testing.T, baseURL, token, userID string, expectedStatus int) {
+	t.Helper()
+	client := &http.Client{}
+	req, _ := http.NewRequest("GET", baseURL+"/v1/sync/pull?user_id="+userID+"&since=0", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("verify token request: %v", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("close response: %v", err)
+		}
+	}()
+	if resp.StatusCode != expectedStatus {
+		t.Fatalf("expected status %d, got %d", expectedStatus, resp.StatusCode)
+	}
+}

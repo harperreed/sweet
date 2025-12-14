@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS tokens (
   device_id TEXT,
   expires_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_tokens_device ON tokens(device_id);
 
 CREATE TABLE IF NOT EXISTS changes (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
