@@ -64,7 +64,7 @@ func main() {
 func summaryCmd() {
 	fs := flag.NewFlagSet("summary", flag.ExitOnError)
 	appDB := fs.String("app-db", defaultAppDBPath, "path to app SQLite db")
-	mustParse(fs)
+	mustParse(os.Args[2:], fs)
 
 	if err := withInspector(*appDB, func(ctx context.Context, insp *inspect.Inspector) error {
 		rows, err := insp.Summary(ctx)
@@ -89,7 +89,7 @@ func listCmd() {
 	appDB := fs.String("app-db", defaultAppDBPath, "path to app SQLite db")
 	entity := fs.String("entity", "", "entity name to inspect (todo, note, log)")
 	limit := fs.Int("limit", 25, "maximum rows to display")
-	mustParse(fs)
+	mustParse(os.Args[2:], fs)
 
 	if err := withInspector(*appDB, func(ctx context.Context, insp *inspect.Inspector) error {
 		records, err := insp.List(ctx, *entity, *limit)
@@ -139,8 +139,8 @@ func indentJSON(raw string) string {
 	return buf.String()
 }
 
-func mustParse(fs *flag.FlagSet) {
-	if err := fs.Parse(os.Args[2:]); err != nil {
+func mustParse(args []string, fs *flag.FlagSet) {
+	if err := fs.Parse(args); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -158,7 +158,7 @@ func registerCmd() {
 	email := fs.String("email", "", "account email (optional)")
 	keyPath := fs.String("key", vault.DefaultSSHKeyPath(), "SSH private key path to register")
 	keyPass := fs.String("key-passphrase", "", "optional SSH key passphrase")
-	mustParse(fs)
+	mustParse(os.Args[2:], fs)
 
 	require(*pbURL != "", "-pb-url required")
 	require(*server != "", "-server required")
@@ -209,7 +209,7 @@ func oldLoginCmd() {
 	keyPath := fs.String("key", vault.DefaultSSHKeyPath(), "SSH private key path")
 	keyPass := fs.String("key-passphrase", "", "optional SSH key passphrase")
 	autoRegister := fs.Bool("register-key", false, "register SSH key before login")
-	mustParse(fs)
+	mustParse(os.Args[2:], fs)
 
 	require(*pbURL != "", "-pb-url required")
 	require(*server != "", "-server required")

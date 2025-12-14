@@ -13,22 +13,8 @@ type ApplyFn func(ctx context.Context, c Change) error
 func Sync(ctx context.Context, store *Store, client *Client, keys Keys, apply ApplyFn) error {
 	userID := keys.UserID()
 
-	items, err := store.DequeueBatch(ctx, 200)
-	if err != nil {
+	if err := pushOutbox(ctx, store, client, userID); err != nil {
 		return err
-	}
-	if len(items) > 0 {
-		pushItems := make([]PushItem, 0, len(items))
-		for _, it := range items {
-			pushItems = append(pushItems, PushItem(it))
-		}
-		resp, err := client.Push(ctx, userID, pushItems)
-		if err != nil {
-			return err
-		}
-		if err := store.AckOutbox(ctx, resp.Ack); err != nil {
-			return err
-		}
 	}
 
 	sinceStr, err := store.GetState(ctx, "last_pulled_seq", "0")
@@ -67,4 +53,31 @@ func Sync(ctx context.Context, store *Store, client *Client, keys Keys, apply Ap
 		}
 	}
 	return nil
+}
+
+// pushOutbox flushes pending changes from the local outbox to the server.
+func pushOutbox(ctx context.Context, store *Store, client *Client, userID string) error {
+	items, err := store.DequeueBatch(ctx, 200)
+	if err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		return nil
+	}
+
+	pushItems := make([]PushItem, 0, len(items))
+	for _, it := range items {
+		pushItems = append(pushItems, PushItem{
+			ChangeID: it.ChangeID,
+			Entity:   it.Entity,
+			TS:       it.TS,
+			Env:      it.Env,
+		})
+	}
+
+	resp, err := client.Push(ctx, userID, pushItems)
+	if err != nil {
+		return err
+	}
+	return store.AckOutbox(ctx, resp.Ack)
 }

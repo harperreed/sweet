@@ -792,6 +792,149 @@ func TestAccountMigration(t *testing.T) {
 	verifyOldTokenInvalidated(t, env)
 }
 
+func TestRateLimiterWithZeroIntervalInServer(t *testing.T) {
+	// Integration test: Verify that setting interval=0 in a real server
+	// environment properly disables rate limiting
+	env := newServerTestEnv(t)
+
+	// Disable rate limiting
+	env.setRateLimit(0, 1000)
+
+	client := &http.Client{}
+
+	// Make 100 rapid requests - all should succeed
+	for i := 0; i < 100; i++ {
+		req, _ := http.NewRequest("GET", env.server.URL+"/v1/sync/pull?user_id="+env.userID+"&since=0", nil)
+		req.Header.Set("Authorization", "Bearer "+env.token)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("request %d failed: %v", i, err)
+		}
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("close response %d: %v", i, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("request %d: expected 200, got %d (rate limiting should be disabled)", i, resp.StatusCode)
+		}
+	}
+}
+
+func TestCannotRevokeSelf(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db := openTestDatabase(t, filepath.Join(dir, "syncvault.sqlite"))
+	srv := &Server{
+		db:       db,
+		pbClient: pocketbase.NoopClient{},
+		limiters: newRateLimiterStore(DefaultRateLimitConfig()),
+	}
+	migrateServer(t, srv)
+	ts := startTestServer(t, srv)
+
+	keys, _ := generateKeysAndSigner(t)
+	userID := keys.UserID()
+
+	// Register device A
+	_, privA, _ := ed25519.GenerateKey(rand.Reader)
+	signerA, _ := ssh.NewSignerFromKey(privA)
+	tokenA := registerAndLogin(t, ts.URL, ctx, userID, signerA, "device-a")
+
+	// Get device A's ID
+	deviceAID := getFirstDeviceID(t, ts.URL, tokenA)
+
+	// Try to revoke self - should fail
+	client := &http.Client{}
+	req, _ := http.NewRequest("DELETE", ts.URL+"/v1/devices/"+deviceAID, nil)
+	req.Header.Set("Authorization", "Bearer "+tokenA)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("revoke self request: %v", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("close response: %v", err)
+		}
+	}()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 (cannot revoke self), got %d", resp.StatusCode)
+	}
+
+	// Verify token still works
+	verifyTokenStatus(t, ts.URL, tokenA, userID, http.StatusOK)
+}
+
+func getFirstDeviceID(t *testing.T, baseURL, token string) string {
+	t.Helper()
+	client := &http.Client{}
+	req, _ := http.NewRequest("GET", baseURL+"/v1/devices", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("list devices: %v", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("close response: %v", err)
+		}
+	}()
+
+	var body struct {
+		Devices []struct {
+			DeviceID string `json:"device_id"`
+		} `json:"devices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(body.Devices) == 0 {
+		t.Fatalf("expected at least 1 device, got 0")
+	}
+	return body.Devices[0].DeviceID
+}
+
+func TestSchemaPreventsSQLInjectionNullDeviceID(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db := openTestDatabase(t, filepath.Join(dir, "syncvault.sqlite"))
+	srv := &Server{
+		db:       db,
+		pbClient: pocketbase.NoopClient{},
+		limiters: newRateLimiterStore(DefaultRateLimitConfig()),
+	}
+	migrateServer(t, srv)
+
+	keys, _ := generateKeysAndSigner(t)
+	userID := keys.UserID()
+
+	// Try to insert a token with NULL device_id - should fail with new schema
+	tokenHash := hashToken("legacy_token_sv_test123")
+	now := time.Now().Add(12 * time.Hour).Unix()
+	_, err := db.ExecContext(ctx, `INSERT INTO tokens(token_hash, user_id, device_id, expires_at) VALUES(?,?,NULL,?)`, tokenHash, userID, now)
+	if err == nil {
+		t.Fatalf("expected error when inserting NULL device_id, but succeeded")
+	}
+	if !strings.Contains(err.Error(), "NOT NULL") {
+		t.Fatalf("expected NOT NULL constraint error, got: %v", err)
+	}
+
+	// Verify that default empty string works
+	tokenHash2 := hashToken("token_with_default")
+	_, err = db.ExecContext(ctx, `INSERT INTO tokens(token_hash, user_id, device_id, expires_at) VALUES(?,?,?,?)`, tokenHash2, userID, "", now)
+	if err != nil {
+		t.Fatalf("inserting token with empty string device_id should work: %v", err)
+	}
+
+	// Verify we can read it back
+	var deviceID string
+	err = db.QueryRowContext(ctx, `SELECT device_id FROM tokens WHERE token_hash=?`, tokenHash2).Scan(&deviceID)
+	if err != nil {
+		t.Fatalf("query token: %v", err)
+	}
+	if deviceID != "" {
+		t.Fatalf("expected empty string device_id, got %q", deviceID)
+	}
+}
+
 func generateNewUserID(t *testing.T) string {
 	t.Helper()
 	newSeedParsed, _, err := vault.NewSeedPhrase()
@@ -868,5 +1011,90 @@ func verifyOldTokenInvalidated(t *testing.T, env *serverTestEnv) {
 	}
 	if checkResp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("old token should be invalidated, got %d", checkResp.StatusCode)
+	}
+}
+
+func TestPerItemDeviceID(t *testing.T) {
+	env := newServerTestEnv(t)
+	deviceIDs := []string{"device-a", "device-b", "device-c"}
+
+	pushItems := buildPerItemDeviceIDPushItems(t, env, deviceIDs)
+	client := vault.NewClient(vault.SyncConfig{
+		BaseURL:   env.server.URL,
+		DeviceID:  "rotation-device",
+		AuthToken: env.token,
+	})
+
+	// Push items with per-item device_ids
+	pushResp, err := client.Push(env.ctx, env.userID, pushItems)
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if len(pushResp.Ack) != len(pushItems) {
+		t.Fatalf("expected %d acks, got %d", len(pushItems), len(pushResp.Ack))
+	}
+
+	// Pull and verify device_ids are preserved and decryption works
+	pullResp, err := client.Pull(env.ctx, env.userID, 0)
+	if err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	if len(pullResp.Items) != len(deviceIDs) {
+		t.Fatalf("expected %d items, got %d", len(deviceIDs), len(pullResp.Items))
+	}
+
+	verifyPulledItemsDeviceIDs(t, env, pullResp.Items, deviceIDs)
+}
+
+func buildPerItemDeviceIDPushItems(t *testing.T, env *serverTestEnv, deviceIDs []string) []vault.PushItem {
+	t.Helper()
+	pushItems := make([]vault.PushItem, 0, len(deviceIDs))
+	for i, deviceID := range deviceIDs {
+		change, err := vault.NewChange("doc", fmt.Sprintf("doc-%d", i+1), vault.OpUpsert, map[string]any{"text": "from " + deviceID})
+		if err != nil {
+			t.Fatalf("new change: %v", err)
+		}
+
+		changeBytes, err := json.Marshal(change)
+		if err != nil {
+			t.Fatalf("marshal change: %v", err)
+		}
+
+		aad := change.AAD(env.userID, deviceID)
+		envelope, err := vault.Encrypt(env.keys.EncKey, changeBytes, aad)
+		if err != nil {
+			t.Fatalf("encrypt: %v", err)
+		}
+
+		pushItems = append(pushItems, vault.PushItem{
+			ChangeID: change.ChangeID,
+			Entity:   change.Entity,
+			TS:       change.TS.Unix(),
+			Env:      envelope,
+			DeviceID: deviceID,
+		})
+	}
+	return pushItems
+}
+
+func verifyPulledItemsDeviceIDs(t *testing.T, env *serverTestEnv, items []vault.PullItem, deviceIDs []string) {
+	t.Helper()
+	for i, item := range items {
+		if item.DeviceID != deviceIDs[i] {
+			t.Errorf("item %d: expected device_id=%s, got %s", i, deviceIDs[i], item.DeviceID)
+		}
+
+		// Verify decryption works with the correct device_id in AAD
+		aad := []byte("v1|" + env.userID + "|" + item.DeviceID + "|" + item.ChangeID + "|" + item.Entity)
+		plaintext, err := vault.Decrypt(env.keys.EncKey, item.Env, aad)
+		if err != nil {
+			t.Errorf("decrypt item %d: %v", i, err)
+			continue
+		}
+
+		var change vault.Change
+		if err := json.Unmarshal(plaintext, &change); err != nil {
+			t.Errorf("unmarshal change %d: %v", i, err)
+		}
 	}
 }

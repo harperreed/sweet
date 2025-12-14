@@ -47,7 +47,7 @@ func appendCmd() {
 	cfg.BindFlags(fs)
 	message := fs.String("message", "", "log message")
 	level := fs.String("level", "info", "log level")
-	mustParse(fs)
+	mustParse(os.Args[2:], fs)
 
 	if err := runApp(cfg, func(ctx context.Context, app *appcli.App) error {
 		payload := map[string]any{
@@ -65,7 +65,7 @@ func list() {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	var cfg appcli.RuntimeConfig
 	cfg.BindFlags(fs)
-	mustParse(fs)
+	mustParse(os.Args[2:], fs)
 
 	if err := runApp(cfg, func(ctx context.Context, app *appcli.App) error {
 		items, err := app.DumpRecords(ctx)
@@ -85,7 +85,7 @@ func syncCmd() {
 	fs := flag.NewFlagSet("sync", flag.ExitOnError)
 	var cfg appcli.RuntimeConfig
 	cfg.BindFlags(fs)
-	mustParse(fs)
+	mustParse(os.Args[2:], fs)
 
 	if err := runApp(cfg, func(ctx context.Context, app *appcli.App) error {
 		return app.Sync(ctx)
@@ -114,8 +114,8 @@ func runApp(cfg appcli.RuntimeConfig, fn func(context.Context, *appcli.App) erro
 	return nil
 }
 
-func mustParse(fs *flag.FlagSet) {
-	if err := fs.Parse(os.Args[2:]); err != nil {
+func mustParse(args []string, fs *flag.FlagSet) {
+	if err := fs.Parse(args); err != nil {
 		log.Fatal(err)
 	}
 }

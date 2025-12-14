@@ -11,8 +11,9 @@ import (
 )
 
 // RateLimitConfig holds rate limiter settings.
+// Setting Interval <= 0 disables rate limiting (unlimited requests).
 type RateLimitConfig struct {
-	Interval time.Duration // Time between allowed requests
+	Interval time.Duration // Time between allowed requests (0 or negative = disabled)
 	Burst    int           // Max burst size
 }
 
@@ -52,11 +53,24 @@ func (s *rateLimiterStore) get(userID string) *rate.Limiter {
 	if limiter, ok := s.limiters[userID]; ok {
 		return limiter
 	}
-	limiter = rate.NewLimiter(rate.Every(s.config.Interval), s.config.Burst)
+	limiter = s.newLimiter()
 	s.limiters[userID] = limiter
 	return limiter
 }
 
+// newLimiter creates a rate limiter with the current config.
+// If Interval <= 0, rate limiting is disabled (unlimited rate).
+func (s *rateLimiterStore) newLimiter() *rate.Limiter {
+	if s.config.Interval <= 0 {
+		// Explicitly disable rate limiting with infinite rate
+		return rate.NewLimiter(rate.Inf, s.config.Burst)
+	}
+	return rate.NewLimiter(rate.Every(s.config.Interval), s.config.Burst)
+}
+
+// setConfig updates the rate limit configuration.
+// If interval <= 0, rate limiting is effectively disabled (unlimited rate).
+// Existing limiters are cleared to pick up the new config.
 func (s *rateLimiterStore) setConfig(interval time.Duration, burst int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -40,6 +40,7 @@ type PushItem struct {
 	Entity   string   `json:"entity"`
 	TS       int64    `json:"ts"`
 	Env      Envelope `json:"env"`
+	DeviceID string   `json:"device_id,omitempty"` // Optional per-item device_id (overrides request-level)
 }
 
 // PushResp acknowledges applied change IDs.

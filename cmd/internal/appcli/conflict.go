@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 
 	"suitesync/vault"
 )
@@ -38,8 +39,9 @@ SELECT version, payload FROM records WHERE entity=? AND entity_id=?
 		return nil, err
 	}
 
-	// Check for conflict: remote change based on older version than local
-	if c.BaseVersion < localVersion {
+	// Check for conflict: remote change based on different version than local
+	// This catches both stale (BaseVersion < localVersion) and future (BaseVersion > localVersion) conflicts
+	if c.BaseVersion != localVersion {
 		return &Conflict{
 			Entity:       c.Entity,
 			EntityID:     c.EntityID,
@@ -71,8 +73,9 @@ ON CONFLICT(entity, entity_id) DO UPDATE SET
   updated_at=excluded.updated_at
 `, c.Entity, c.EntityID, string(c.Payload), string(c.Op), newVersion, c.TS.Unix())
 		return err
+	default:
+		return fmt.Errorf("unknown operation: %s", c.Op)
 	}
-	return nil
 }
 
 // GetVersion returns the current version of a record (0 if not exists).

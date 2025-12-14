@@ -285,6 +285,7 @@ func reencryptChanges(items []vault.PullItem, oldKeys, newKeys vault.Keys, newUs
 			Entity:   change.Entity,
 			TS:       change.TS.Unix(),
 			Env:      newEnv,
+			DeviceID: item.DeviceID, // Preserve original device_id for AAD consistency
 		})
 	}
 

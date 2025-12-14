@@ -3,6 +3,7 @@ package vault
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -211,4 +212,87 @@ func (s *fakeSyncServer) setPull(items []PullItem) {
 	s.mu.Lock()
 	s.pullItems = append([]PullItem(nil), items...)
 	s.mu.Unlock()
+}
+
+func TestPushItemPreservesPerItemDeviceID(t *testing.T) {
+	ctx := context.Background()
+	keys := testDeriveKeys(t)
+
+	fake := newFakeSyncServer()
+	ts := httptest.NewServer(fake.handler())
+	defer ts.Close()
+
+	client := NewClient(SyncConfig{BaseURL: ts.URL, DeviceID: "rotation-device", AuthToken: "test-token"})
+
+	// Create changes that were originally from different devices
+	deviceIDs := []string{"device-a", "device-b", "device-c"}
+	pushItems := buildPushItemsWithDeviceIDs(t, keys, deviceIDs)
+
+	// Push items with per-item device_ids
+	resp, err := client.Push(ctx, keys.UserID(), pushItems)
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if len(resp.Ack) != len(pushItems) {
+		t.Fatalf("expected %d acks, got %d", len(pushItems), len(resp.Ack))
+	}
+
+	// Verify that fake server received the per-item device_ids
+	fake.mu.Lock()
+	pushedItems := fake.pushed
+	fake.mu.Unlock()
+
+	if len(pushedItems) != len(deviceIDs) {
+		t.Fatalf("expected %d pushed items, got %d", len(deviceIDs), len(pushedItems))
+	}
+
+	for i, item := range pushedItems {
+		if item.DeviceID != deviceIDs[i] {
+			t.Errorf("item %d: expected device_id=%s, got %s", i, deviceIDs[i], item.DeviceID)
+		}
+	}
+}
+
+func testDeriveKeys(t *testing.T) Keys {
+	t.Helper()
+	seed := SeedPhrase{Raw: bytes32(0x42)}
+	params := DefaultKDFParams()
+	params.Time = 1
+	params.MemoryMB = 32
+	keys, err := DeriveKeys(seed, "", params)
+	if err != nil {
+		t.Fatalf("derive keys: %v", err)
+	}
+	return keys
+}
+
+func buildPushItemsWithDeviceIDs(t *testing.T, keys Keys, deviceIDs []string) []PushItem {
+	t.Helper()
+	pushItems := make([]PushItem, 0, len(deviceIDs))
+	for i, deviceID := range deviceIDs {
+		change, err := NewChange("doc", fmt.Sprintf("doc-%d", i+1), OpUpsert, map[string]any{"text": "from " + deviceID})
+		if err != nil {
+			t.Fatalf("new change: %v", err)
+		}
+
+		plain, err := json.Marshal(change)
+		if err != nil {
+			t.Fatalf("marshal change: %v", err)
+		}
+
+		aad := change.AAD(keys.UserID(), deviceID)
+		env, err := Encrypt(keys.EncKey, plain, aad)
+		if err != nil {
+			t.Fatalf("encrypt: %v", err)
+		}
+
+		pushItems = append(pushItems, PushItem{
+			ChangeID: change.ChangeID,
+			Entity:   change.Entity,
+			TS:       change.TS.Unix(),
+			Env:      env,
+			DeviceID: deviceID,
+		})
+	}
+	return pushItems
 }

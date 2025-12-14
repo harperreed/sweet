@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS challenges (
 CREATE TABLE IF NOT EXISTS tokens (
   token_hash TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
-  device_id TEXT,
+  device_id TEXT NOT NULL DEFAULT '',
   expires_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tokens_device ON tokens(device_id);
@@ -432,10 +432,16 @@ func (s *Server) issueTokenForDevice(userID, deviceID string) (verifyResp, error
 // auth middleware
 
 type ctxUserIDKey struct{}
+type ctxDeviceIDKey struct{}
+
+type authInfo struct {
+	userID   string
+	deviceID string
+}
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		userID, err := s.authUser(r)
+		info, err := s.authUser(r)
 		if err != nil {
 			fail(w, http.StatusUnauthorized, err.Error())
 			return
@@ -443,41 +449,43 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 
 		// Rate limit check
 		if s.limiters != nil {
-			limiter := s.limiters.get(userID)
+			limiter := s.limiters.get(info.userID)
 			if !limiter.Allow() {
 				fail(w, http.StatusTooManyRequests, "rate limit exceeded")
 				return
 			}
 		}
 
-		ctx := context.WithValue(r.Context(), ctxUserIDKey{}, userID)
+		ctx := context.WithValue(r.Context(), ctxUserIDKey{}, info.userID)
+		ctx = context.WithValue(ctx, ctxDeviceIDKey{}, info.deviceID)
 		next(w, r.WithContext(ctx))
 	}
 }
 
-func (s *Server) authUser(r *http.Request) (string, error) {
+func (s *Server) authUser(r *http.Request) (authInfo, error) {
 	h := r.Header.Get("Authorization")
 	if h == "" || !strings.HasPrefix(h, "Bearer ") {
-		return "", errors.New("missing bearer token")
+		return authInfo{}, errors.New("missing bearer token")
 	}
 	raw := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
 	if raw == "" {
-		return "", errors.New("missing bearer token")
+		return authInfo{}, errors.New("missing bearer token")
 	}
 	th := hashToken(raw)
 
 	var userID string
+	var deviceID string
 	var exp int64
-	if err := s.db.QueryRow(`SELECT user_id, expires_at FROM tokens WHERE token_hash=?`, th).Scan(&userID, &exp); err != nil {
+	if err := s.db.QueryRow(`SELECT user_id, device_id, expires_at FROM tokens WHERE token_hash=?`, th).Scan(&userID, &deviceID, &exp); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", errors.New("invalid token")
+			return authInfo{}, errors.New("invalid token")
 		}
-		return "", errors.New("db error")
+		return authInfo{}, errors.New("db error")
 	}
 	if time.Now().Unix() > exp {
-		return "", errors.New("token expired")
+		return authInfo{}, errors.New("token expired")
 	}
-	return userID, nil
+	return authInfo{userID: userID, deviceID: deviceID}, nil
 }
 
 // push/pull
@@ -493,6 +501,7 @@ type pushItem struct {
 	Entity   string   `json:"entity"`
 	TS       int64    `json:"ts"`
 	Env      envelope `json:"env"`
+	DeviceID string   `json:"device_id,omitempty"` // Optional per-item device_id (overrides request-level)
 }
 
 type envelope struct {
@@ -572,7 +581,12 @@ VALUES(?,?,?,?,?,?,?)
 		if ts == 0 {
 			ts = time.Now().Unix()
 		}
-		if _, err := stmt.ExecContext(ctx, req.UserID, it.ChangeID, req.DeviceID, it.Entity, ts, it.Env.NonceB64, it.Env.CTB64); err != nil {
+		// Use per-item device_id if provided, otherwise fall back to request-level device_id
+		deviceID := it.DeviceID
+		if deviceID == "" {
+			deviceID = req.DeviceID
+		}
+		if _, err := stmt.ExecContext(ctx, req.UserID, it.ChangeID, deviceID, it.Entity, ts, it.Env.NonceB64, it.Env.CTB64); err != nil {
 			return nil, errors.New("db error")
 		}
 		ack = append(ack, it.ChangeID)

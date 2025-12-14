@@ -50,7 +50,7 @@ func upsert() {
 	id := fs.String("id", "", "note id")
 	title := fs.String("title", "", "note title")
 	body := fs.String("body", "", "note body")
-	mustParse(fs)
+	mustParse(os.Args[2:], fs)
 
 	if err := runApp(cfg, func(ctx context.Context, app *appcli.App) error {
 		payload := map[string]any{
@@ -68,7 +68,7 @@ func deleteCmd() {
 	var cfg appcli.RuntimeConfig
 	cfg.BindFlags(fs)
 	id := fs.String("id", "", "note id")
-	mustParse(fs)
+	mustParse(os.Args[2:], fs)
 
 	if err := runApp(cfg, func(ctx context.Context, app *appcli.App) error {
 		return app.Delete(ctx, *id)
@@ -81,7 +81,7 @@ func list() {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	var cfg appcli.RuntimeConfig
 	cfg.BindFlags(fs)
-	mustParse(fs)
+	mustParse(os.Args[2:], fs)
 
 	if err := runApp(cfg, func(ctx context.Context, app *appcli.App) error {
 		items, err := app.DumpRecords(ctx)
@@ -101,7 +101,7 @@ func syncCmd() {
 	fs := flag.NewFlagSet("sync", flag.ExitOnError)
 	var cfg appcli.RuntimeConfig
 	cfg.BindFlags(fs)
-	mustParse(fs)
+	mustParse(os.Args[2:], fs)
 
 	if err := runApp(cfg, func(ctx context.Context, app *appcli.App) error {
 		return app.Sync(ctx)
@@ -130,8 +130,8 @@ func runApp(cfg appcli.RuntimeConfig, fn func(context.Context, *appcli.App) erro
 	return nil
 }
 
-func mustParse(fs *flag.FlagSet) {
-	if err := fs.Parse(os.Args[2:]); err != nil {
+func mustParse(args []string, fs *flag.FlagSet) {
+	if err := fs.Parse(args); err != nil {
 		log.Fatal(err)
 	}
 }

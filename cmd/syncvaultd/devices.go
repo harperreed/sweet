@@ -61,12 +61,19 @@ func (s *Server) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := r.Context().Value(ctxUserIDKey{}).(string)
+	currentDeviceID := r.Context().Value(ctxDeviceIDKey{}).(string)
 
 	// Extract device_id from path: /v1/devices/{device_id}
 	path := strings.TrimPrefix(r.URL.Path, "/v1/devices/")
 	deviceID := strings.TrimSpace(path)
 	if deviceID == "" {
 		fail(w, http.StatusBadRequest, "device_id required")
+		return
+	}
+
+	// Prevent self-revocation
+	if deviceID == currentDeviceID {
+		fail(w, http.StatusForbidden, "cannot revoke current device")
 		return
 	}
 

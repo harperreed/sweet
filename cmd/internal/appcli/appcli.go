@@ -130,16 +130,22 @@ func (a *App) ApplyChange(ctx context.Context, c vault.Change) error {
 		_, err := a.appDB.ExecContext(ctx, `DELETE FROM records WHERE entity=? AND entity_id=?`, c.Entity, c.EntityID)
 		return err
 	}
-	_, err := a.appDB.ExecContext(ctx, `
+
+	switch c.Op {
+	case vault.OpUpsert, vault.OpAppend:
+		_, err := a.appDB.ExecContext(ctx, `
 INSERT INTO records(entity, entity_id, payload, op, version, updated_at)
-VALUES(?,?,?,?,0,?)
+VALUES(?,?,?,?,1,?)
 ON CONFLICT(entity, entity_id) DO UPDATE SET
   payload=excluded.payload,
   op=excluded.op,
   version=records.version+1,
   updated_at=excluded.updated_at
 `, c.Entity, c.EntityID, string(c.Payload), string(c.Op), c.TS.Unix())
-	return err
+		return err
+	default:
+		return fmt.Errorf("unknown operation: %s", c.Op)
+	}
 }
 
 func (a *App) queueChange(ctx context.Context, entityID string, op vault.Op, payload map[string]any) error {

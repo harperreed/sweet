@@ -33,7 +33,7 @@ func registerCmd() {
 	user := fs.String("user", "", "user id (derived from vault keys)")
 	keyPath := fs.String("key", vault.DefaultSSHKeyPath(), "SSH private key path")
 	passphrase := fs.String("passphrase", "", "optional key passphrase")
-	mustParse(fs)
+	mustParse(os.Args[2:], fs)
 
 	require(*server != "", "-server is required")
 	require(*user != "", "-user is required")
@@ -54,7 +54,7 @@ func loginCmd() {
 	passphrase := fs.String("passphrase", "", "optional key passphrase")
 	autoReg := fs.Bool("register", false, "register key before login")
 	outFile := fs.String("out", "", "optional file to write bearer token")
-	mustParse(fs)
+	mustParse(os.Args[2:], fs)
 
 	require(*server != "", "-server is required")
 	require(*user != "", "-user is required")
@@ -75,8 +75,8 @@ func loginCmd() {
 	}
 }
 
-func mustParse(fs *flag.FlagSet) {
-	if err := fs.Parse(os.Args[2:]); err != nil {
+func mustParse(args []string, fs *flag.FlagSet) {
+	if err := fs.Parse(args); err != nil {
 		log.Fatal(err)
 	}
 }
