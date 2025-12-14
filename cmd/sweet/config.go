@@ -16,16 +16,18 @@ import (
 
 // Config represents the sweet CLI configuration.
 type Config struct {
-	Seed     string `json:"seed"`
-	Server   string `json:"server"`
-	Token    string `json:"token"`
-	AppDB    string `json:"app_db"`
-	VaultDB  string `json:"vault_db"`
-	DeviceID string `json:"device_id"`
+	Seed         string `json:"seed"`
+	Server       string `json:"server"`
+	Token        string `json:"token"`
+	TokenExpires string `json:"token_expires,omitempty"`
+	AppDB        string `json:"app_db"`
+	VaultDB      string `json:"vault_db"`
+	DeviceID     string `json:"device_id"`
 }
 
-// ConfigPath returns the path to the sweet config file.
-func ConfigPath() string {
+// ConfigPath is a function that returns the path to the sweet config file.
+// It can be overridden in tests.
+var ConfigPath = func() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(os.TempDir(), ".sweet", "config.json")

@@ -30,8 +30,20 @@ func main() {
 		listCmd()
 	case "register":
 		registerCmd()
+	case "old-login":
+		oldLoginCmd()
 	case "login":
-		loginCmd()
+		if err := cmdLogin(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+	case "logout":
+		if err := cmdLogout(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+	case "status":
+		if err := cmdStatus(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
 	case "rotate-seed":
 		if err := cmdRotateSeed(os.Args[2:]); err != nil {
 			log.Fatal(err)
@@ -134,7 +146,7 @@ func mustParse(fs *flag.FlagSet) {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "sweet commands: summary | list | register | login | rotate-seed | init | kv\n")
+	fmt.Fprintf(os.Stderr, "sweet commands: summary | list | register | old-login | login | logout | status | rotate-seed | init | kv\n")
 }
 
 func registerCmd() {
@@ -187,7 +199,7 @@ func registerCmd() {
 	fmt.Println(phrase)
 }
 
-func loginCmd() {
+func oldLoginCmd() {
 	fs := flag.NewFlagSet("login", flag.ExitOnError)
 	pbURL := fs.String("pb-url", "", "PocketBase base URL")
 	server := fs.String("server", "", "sync server base URL")
