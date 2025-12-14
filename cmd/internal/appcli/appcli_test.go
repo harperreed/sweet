@@ -36,6 +36,51 @@ func TestConflictDetection(t *testing.T) {
 	})
 }
 
+func TestApplyChangeVersionTracking(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	app, err := NewTestApp(dir)
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer func() {
+		if closeErr := app.Close(); closeErr != nil {
+			t.Errorf("close app: %v", closeErr)
+		}
+	}()
+
+	entityID := "test-item"
+
+	testApplyChangeIncrementsVersion(t, ctx, app, entityID, "first", 0)
+	testApplyChangeIncrementsVersion(t, ctx, app, entityID, "second", 1)
+	testApplyChangeIncrementsVersion(t, ctx, app, entityID, "third", 2)
+}
+
+func testApplyChangeIncrementsVersion(t *testing.T, ctx context.Context, app *App, entityID, text string, expectedVersion int64) {
+	t.Helper()
+
+	change := vault.Change{
+		Entity:   "test-entity",
+		EntityID: entityID,
+		Payload:  []byte(`{"text":"` + text + `"}`),
+		Op:       vault.OpUpsert,
+		TS:       time.Now().UTC(),
+	}
+
+	if err := app.ApplyChange(ctx, change); err != nil {
+		t.Fatalf("apply change: %v", err)
+	}
+
+	version, err := app.GetVersion(ctx, "test-entity", entityID)
+	if err != nil {
+		t.Fatalf("get version: %v", err)
+	}
+	if version != expectedVersion {
+		t.Errorf("expected version %d, got %d", expectedVersion, version)
+	}
+}
+
 func testNoConflictOnSequentialUpdates(t *testing.T, ctx context.Context, app *App) {
 	t.Helper()
 

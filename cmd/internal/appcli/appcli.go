@@ -131,11 +131,12 @@ func (a *App) ApplyChange(ctx context.Context, c vault.Change) error {
 		return err
 	}
 	_, err := a.appDB.ExecContext(ctx, `
-INSERT INTO records(entity, entity_id, payload, op, updated_at)
-VALUES(?,?,?,?,?)
+INSERT INTO records(entity, entity_id, payload, op, version, updated_at)
+VALUES(?,?,?,?,0,?)
 ON CONFLICT(entity, entity_id) DO UPDATE SET
   payload=excluded.payload,
   op=excluded.op,
+  version=records.version+1,
   updated_at=excluded.updated_at
 `, c.Entity, c.EntityID, string(c.Payload), string(c.Op), c.TS.Unix())
 	return err
