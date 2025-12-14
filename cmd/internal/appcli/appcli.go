@@ -142,6 +142,12 @@ ON CONFLICT(entity, entity_id) DO UPDATE SET
 }
 
 func (a *App) queueChange(ctx context.Context, entityID string, op vault.Op, payload map[string]any) error {
+	// Get current version before update
+	baseVersion, err := a.GetVersion(ctx, a.opts.Entity, entityID)
+	if err != nil {
+		return err
+	}
+
 	var body any
 	if payload != nil {
 		copyPayload := make(map[string]any, len(payload)+1)
@@ -151,7 +157,7 @@ func (a *App) queueChange(ctx context.Context, entityID string, op vault.Op, pay
 		copyPayload["updated_at"] = time.Now().UTC().Unix()
 		body = copyPayload
 	}
-	change, err := vault.NewChange(a.opts.Entity, entityID, op, body)
+	change, err := vault.NewChangeWithVersion(a.opts.Entity, entityID, op, body, baseVersion)
 	if err != nil {
 		return err
 	}
@@ -190,6 +196,7 @@ CREATE TABLE IF NOT EXISTS records (
   entity_id TEXT NOT NULL,
   payload TEXT,
   op TEXT NOT NULL,
+  version INTEGER DEFAULT 0,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY(entity, entity_id)
 );

@@ -18,13 +18,14 @@ const (
 
 // Change is the plaintext logical event before encryption.
 type Change struct {
-	ChangeID string          `json:"change_id"`
-	Entity   string          `json:"entity"`
-	EntityID string          `json:"entity_id"`
-	Op       Op              `json:"op"`
-	TS       time.Time       `json:"ts"`
-	Payload  json.RawMessage `json:"payload,omitempty"`
-	Deleted  bool            `json:"deleted,omitempty"`
+	ChangeID    string          `json:"change_id"`
+	Entity      string          `json:"entity"`
+	EntityID    string          `json:"entity_id"`
+	Op          Op              `json:"op"`
+	TS          time.Time       `json:"ts"`
+	Payload     json.RawMessage `json:"payload,omitempty"`
+	Deleted     bool            `json:"deleted,omitempty"`
+	BaseVersion int64           `json:"base_version,omitempty"`
 }
 
 // NewChange builds a change with a ULID and marshalled payload.
@@ -46,6 +47,16 @@ func NewChange(entity, entityID string, op Op, payload any) (Change, error) {
 		TS:       time.Now().UTC(),
 		Payload:  raw,
 	}, nil
+}
+
+// NewChangeWithVersion builds a change that tracks the base version.
+func NewChangeWithVersion(entity, entityID string, op Op, payload any, baseVersion int64) (Change, error) {
+	c, err := NewChange(entity, entityID, op, payload)
+	if err != nil {
+		return Change{}, err
+	}
+	c.BaseVersion = baseVersion
+	return c, nil
 }
 
 // AAD produces deterministic binding bytes for encryption.
