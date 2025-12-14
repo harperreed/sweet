@@ -32,6 +32,10 @@ func main() {
 		registerCmd()
 	case "login":
 		loginCmd()
+	case "rotate-seed":
+		if err := cmdRotateSeed(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
 	default:
 		usage()
 	}
@@ -122,7 +126,7 @@ func mustParse(fs *flag.FlagSet) {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "sweet commands: summary | list | register | login\n")
+	fmt.Fprintf(os.Stderr, "sweet commands: summary | list | register | login | rotate-seed\n")
 }
 
 func registerCmd() {

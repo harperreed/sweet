@@ -314,6 +314,10 @@ func (m *mockPocketBaseClient) IncrementUsage(ctx context.Context, userID string
 	return nil
 }
 
+func (m *mockPocketBaseClient) MigrateUserID(ctx context.Context, oldUserID, newUserID string) error {
+	return nil
+}
+
 func (m *mockPocketBaseClient) ensureAccount(userID string) {
 	if !m.accountSet {
 		m.account = pocketbase.AccountInfo{UserID: userID, Active: true}
@@ -775,5 +779,94 @@ func verifySnapshotInPull(t *testing.T, env *serverTestEnv) {
 	}
 	if pullResp.Snapshot.MinSeq != 5 {
 		t.Errorf("expected snapshot min_seq=5, got %d", pullResp.Snapshot.MinSeq)
+	}
+}
+
+func TestAccountMigration(t *testing.T) {
+	env := newServerTestEnv(t)
+	env.pushChange(t, "device-a")
+
+	newUserID := generateNewUserID(t)
+	callMigrateEndpoint(t, env, newUserID)
+	verifyDevicesMigrated(t, env, newUserID)
+	verifyOldTokenInvalidated(t, env)
+}
+
+func generateNewUserID(t *testing.T) string {
+	t.Helper()
+	newSeedParsed, _, err := vault.NewSeedPhrase()
+	if err != nil {
+		t.Fatalf("new seed: %v", err)
+	}
+	newKeys, err := vault.DeriveKeys(newSeedParsed, "", vault.DefaultKDFParams())
+	if err != nil {
+		t.Fatalf("derive new keys: %v", err)
+	}
+	return newKeys.UserID()
+}
+
+func callMigrateEndpoint(t *testing.T, env *serverTestEnv, newUserID string) {
+	t.Helper()
+	migrateReq := map[string]any{
+		"old_user_id": env.userID,
+		"new_user_id": newUserID,
+		"confirm":     true,
+	}
+	body, err := json.Marshal(migrateReq)
+	if err != nil {
+		t.Fatalf("marshal migrate req: %v", err)
+	}
+	req, err := http.NewRequest("POST", env.server.URL+"/v1/account/migrate", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("create migrate request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+env.token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("migrate request: %v", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("close response: %v", err)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp map[string]string
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+			t.Fatalf("expected 200, got %d: %v", resp.StatusCode, errResp)
+		} else {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+	}
+}
+
+func verifyDevicesMigrated(t *testing.T, env *serverTestEnv, newUserID string) {
+	t.Helper()
+	var count int
+	if err := env.srv.db.QueryRow(`SELECT COUNT(*) FROM devices WHERE user_id=?`, newUserID).Scan(&count); err != nil {
+		t.Fatalf("query devices: %v", err)
+	}
+	if count == 0 {
+		t.Fatalf("expected devices under new user_id")
+	}
+}
+
+func verifyOldTokenInvalidated(t *testing.T, env *serverTestEnv) {
+	t.Helper()
+	client := &http.Client{}
+	checkReq, _ := http.NewRequest("GET", env.server.URL+"/v1/sync/pull?user_id="+env.userID+"&since=0", nil)
+	checkReq.Header.Set("Authorization", "Bearer "+env.token)
+	checkResp, err := client.Do(checkReq)
+	if err != nil {
+		t.Fatalf("check old token request: %v", err)
+	}
+	if err := checkResp.Body.Close(); err != nil {
+		t.Fatalf("close check response: %v", err)
+	}
+	if checkResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old token should be invalidated, got %d", checkResp.StatusCode)
 	}
 }

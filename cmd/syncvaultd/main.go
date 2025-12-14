@@ -174,6 +174,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/v1/sync/compact", s.withAuth(s.handleCompact))
 	mux.HandleFunc("/v1/devices", s.withAuth(s.handleListDevices))
 	mux.HandleFunc("/v1/devices/", s.withAuth(s.handleRevokeDevice))
+	mux.HandleFunc("/v1/account/migrate", s.withAuth(s.handleMigrate))
 	return withJSON(withLogging(mux))
 }
 

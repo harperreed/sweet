@@ -25,6 +25,7 @@ type AccountInfo struct {
 type Client interface {
 	GetAccountByUserID(ctx context.Context, userID string) (AccountInfo, error)
 	IncrementUsage(ctx context.Context, userID string, changes int) error
+	MigrateUserID(ctx context.Context, oldUserID, newUserID string) error
 }
 
 // NoopClient is used when PocketBase isn't configured.
@@ -35,6 +36,10 @@ func (NoopClient) GetAccountByUserID(ctx context.Context, userID string) (Accoun
 }
 
 func (NoopClient) IncrementUsage(ctx context.Context, userID string, changes int) error {
+	return nil
+}
+
+func (NoopClient) MigrateUserID(ctx context.Context, oldUserID, newUserID string) error {
 	return nil
 }
 
@@ -129,6 +134,28 @@ func (c *HTTPClient) IncrementUsage(ctx context.Context, userID string, changes 
 	}()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("pocketbase usage: %s", resp.Status)
+	}
+	return nil
+}
+
+func (c *HTTPClient) MigrateUserID(ctx context.Context, oldUserID, newUserID string) error {
+	body := map[string]any{
+		"old_user_id": oldUserID,
+		"new_user_id": newUserID,
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	resp, err := c.adminRequest(ctx, http.MethodPost, "/api/hooks/migrate", payload)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("pocketbase migrate: %s", resp.Status)
 	}
 	return nil
 }
