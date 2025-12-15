@@ -2,6 +2,8 @@ module suitesync
 
 go 1.24.0
 
+toolchain go1.24.11
+
 require (
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pocketbase/pocketbase v0.34.2

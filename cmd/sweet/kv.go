@@ -35,6 +35,7 @@ func loadRuntimeConfig(args []string) (*parsedConfig, error) {
 		ServerURL:  fileCfg.Server,
 		AuthToken:  fileCfg.Token,
 		UserID:     fileCfg.UserID,
+		AutoSync:   fileCfg.AutoSync,
 	}
 
 	// Parse flags (flags override config)

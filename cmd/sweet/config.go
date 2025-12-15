@@ -26,6 +26,7 @@ type Config struct {
 	DeviceID     string `json:"device_id"`
 	AppDB        string `json:"app_db"`
 	VaultDB      string `json:"vault_db"`
+	AutoSync     bool   `json:"auto_sync"` // If true, sync after each write
 }
 
 // ConfigPath is a function that returns the path to the sweet config file.
@@ -145,6 +146,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if deviceID := os.Getenv("SWEET_DEVICE_ID"); deviceID != "" {
 		cfg.DeviceID = deviceID
+	}
+	if autoSync := os.Getenv("SWEET_AUTO_SYNC"); autoSync == "1" || autoSync == "true" {
+		cfg.AutoSync = true
 	}
 }
 

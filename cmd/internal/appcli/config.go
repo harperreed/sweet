@@ -12,6 +12,7 @@ type RuntimeConfig struct {
 	ServerURL  string
 	AuthToken  string
 	UserID     string // Server-side user ID (PocketBase record ID)
+	AutoSync   bool   // If true, sync after each mutation
 }
 
 // BindFlags attaches shared flags to provided FlagSet.
@@ -23,6 +24,7 @@ func (rc *RuntimeConfig) BindFlags(fs *flag.FlagSet) {
 	fs.StringVar(&rc.DeviceID, "device", rc.DeviceID, "stable device identifier")
 	fs.StringVar(&rc.ServerURL, "server", rc.ServerURL, "sync server base URL")
 	fs.StringVar(&rc.AuthToken, "token", rc.AuthToken, "bearer token")
+	fs.BoolVar(&rc.AutoSync, "auto-sync", rc.AutoSync, "sync after each write")
 }
 
 // Options converts runtime config into app Options for entity.
@@ -37,5 +39,6 @@ func (rc RuntimeConfig) Options(entity string) Options {
 		ServerURL:  rc.ServerURL,
 		AuthToken:  rc.AuthToken,
 		UserID:     rc.UserID,
+		AutoSync:   rc.AutoSync,
 	}
 }

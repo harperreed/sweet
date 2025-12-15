@@ -26,6 +26,7 @@ type Options struct {
 	ServerURL  string
 	AuthToken  string
 	UserID     string // Server-side user identifier (PocketBase record ID)
+	AutoSync   bool   // If true, sync after each mutation
 }
 
 // App glues an entity-specific CLI to the vault library.
@@ -189,7 +190,20 @@ func (a *App) queueChange(ctx context.Context, entityID string, op vault.Op, pay
 	if err != nil {
 		return err
 	}
-	return a.store.EnqueueEncryptedChange(ctx, change, a.keys.UserID(), a.opts.DeviceID, env)
+	if err := a.store.EnqueueEncryptedChange(ctx, change, a.keys.UserID(), a.opts.DeviceID, env); err != nil {
+		return err
+	}
+
+	// Auto-sync if enabled and server is configured
+	if a.opts.AutoSync && a.canSync() {
+		return a.Sync(ctx)
+	}
+	return nil
+}
+
+// canSync returns true if server credentials are configured.
+func (a *App) canSync() bool {
+	return a.opts.ServerURL != "" && a.opts.AuthToken != "" && a.opts.UserID != ""
 }
 
 func ensureDir(path string) error {
