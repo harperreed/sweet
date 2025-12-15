@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -74,7 +75,9 @@ func (s *Server) handlePBRegister(w http.ResponseWriter, r *http.Request) {
 	userRecord := core.NewRecord(usersCol)
 	userRecord.Set("email", req.Email)
 	userRecord.SetPassword(req.Password)
-	userRecord.Set("verified", false) // Require email verification
+	// Auto-verify in dev mode (set DEV_MODE=1 for local testing)
+	autoVerify := os.Getenv("DEV_MODE") == "1"
+	userRecord.Set("verified", autoVerify)
 
 	if err := s.app.Save(userRecord); err != nil {
 		log.Printf("user creation error: %v", err)

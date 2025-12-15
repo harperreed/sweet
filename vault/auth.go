@@ -74,7 +74,7 @@ func (c *PBAuthClient) Register(ctx context.Context, email, password string) (Re
 		Password: password,
 	}
 
-	resp, err := c.doJSON(ctx, "/v1/auth/register", req)
+	resp, err := c.doJSON(ctx, "/v1/auth/pb/register", req)
 	if err != nil {
 		return RegisterResult{}, err
 	}
@@ -120,7 +120,7 @@ func (c *PBAuthClient) Login(ctx context.Context, email, password string) (Login
 		Password: password,
 	}
 
-	resp, err := c.doJSON(ctx, "/v1/auth/login", req)
+	resp, err := c.doJSON(ctx, "/v1/auth/pb/login", req)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -162,7 +162,7 @@ func (c *PBAuthClient) Refresh(ctx context.Context, refreshToken string) (Refres
 		RefreshToken: refreshToken,
 	}
 
-	resp, err := c.doJSON(ctx, "/v1/auth/refresh", req)
+	resp, err := c.doJSON(ctx, "/v1/auth/pb/refresh", req)
 	if err != nil {
 		return RefreshResult{}, err
 	}

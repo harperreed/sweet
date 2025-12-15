@@ -14,7 +14,7 @@ import (
 func TestAuthClientRegister(t *testing.T) {
 	// Mock server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/auth/register" {
+		if r.URL.Path != "/v1/auth/pb/register" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Method != http.MethodPost {
@@ -61,7 +61,7 @@ func TestAuthClientRegister(t *testing.T) {
 
 func TestAuthClientLogin(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/auth/login" {
+		if r.URL.Path != "/v1/auth/pb/login" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 
@@ -90,7 +90,7 @@ func TestAuthClientLogin(t *testing.T) {
 
 func TestAuthClientRefresh(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/auth/refresh" {
+		if r.URL.Path != "/v1/auth/pb/refresh" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 
