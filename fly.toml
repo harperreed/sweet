@@ -6,9 +6,12 @@ kill_timeout = "5s"
 [build]
   dockerfile = "Dockerfile"
 
-[env]
-  ADDR = "0.0.0.0:8080"
-  DB_PATH = "/data/syncvault.sqlite"
+[http_service]
+  internal_port = 8090
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 1
 
 [[mounts]]
   source = "vault_data"

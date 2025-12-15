@@ -29,3 +29,8 @@ go.work
 # OS
 .DS_Store
 Thumbs.db
+code-review.md
+missing-tests.md
+output.txt
+
+.scratch/
