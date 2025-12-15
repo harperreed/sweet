@@ -1,12 +1,9 @@
 package main
 
 import (
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
-
-	"suitesync/vault"
 )
 
 func TestConfigPath(t *testing.T) {
@@ -68,20 +65,21 @@ func TestLoadConfig_EnvOverrides(t *testing.T) {
 	defer func() { _ = os.Setenv("HOME", originalHome) }()
 
 	// Set environment variables
-	testSeed := "abc123"
+	// Note: SWEET_MNEMONIC is intentionally NOT supported for security
 	testServer := "https://example.com"
 	testToken := "test-token"
 	testDeviceID := "test-device"
+	testEmail := "test@example.com"
 
-	_ = os.Setenv("SWEET_SEED", testSeed)
 	_ = os.Setenv("SWEET_SERVER", testServer)
 	_ = os.Setenv("SWEET_TOKEN", testToken)
 	_ = os.Setenv("SWEET_DEVICE_ID", testDeviceID)
+	_ = os.Setenv("SWEET_EMAIL", testEmail)
 	defer func() {
-		_ = os.Unsetenv("SWEET_SEED")
 		_ = os.Unsetenv("SWEET_SERVER")
 		_ = os.Unsetenv("SWEET_TOKEN")
 		_ = os.Unsetenv("SWEET_DEVICE_ID")
+		_ = os.Unsetenv("SWEET_EMAIL")
 	}()
 
 	cfg, err := LoadConfig()
@@ -89,9 +87,6 @@ func TestLoadConfig_EnvOverrides(t *testing.T) {
 		t.Fatalf("LoadConfig failed: %v", err)
 	}
 
-	if cfg.Seed != testSeed {
-		t.Errorf("Seed not set from env: got %s, want %s", cfg.Seed, testSeed)
-	}
 	if cfg.Server != testServer {
 		t.Errorf("Server not set from env: got %s, want %s", cfg.Server, testServer)
 	}
@@ -100,6 +95,9 @@ func TestLoadConfig_EnvOverrides(t *testing.T) {
 	}
 	if cfg.DeviceID != testDeviceID {
 		t.Errorf("DeviceID not set from env: got %s, want %s", cfg.DeviceID, testDeviceID)
+	}
+	if cfg.Email != testEmail {
+		t.Errorf("Email not set from env: got %s, want %s", cfg.Email, testEmail)
 	}
 }
 
@@ -112,7 +110,7 @@ func TestSaveAndLoadConfig(t *testing.T) {
 
 	// Create a config
 	originalCfg := &Config{
-		Seed:     "test-seed-phrase",
+		Mnemonic: "test-seed-phrase",
 		Server:   "https://test.example.com",
 		Token:    "test-token",
 		AppDB:    filepath.Join(tmpDir, "app.db"),
@@ -132,8 +130,8 @@ func TestSaveAndLoadConfig(t *testing.T) {
 	}
 
 	// Compare
-	if loadedCfg.Seed != originalCfg.Seed {
-		t.Errorf("Seed mismatch: got %s, want %s", loadedCfg.Seed, originalCfg.Seed)
+	if loadedCfg.Mnemonic != originalCfg.Mnemonic {
+		t.Errorf("Mnemonic mismatch: got %s, want %s", loadedCfg.Mnemonic, originalCfg.Mnemonic)
 	}
 	if loadedCfg.Server != originalCfg.Server {
 		t.Errorf("Server mismatch: got %s, want %s", loadedCfg.Server, originalCfg.Server)
@@ -175,9 +173,9 @@ func TestInitConfig(t *testing.T) {
 	_ = w.Close()
 	os.Stderr = oldStderr
 
-	// Verify config was created
-	if cfg.Seed == "" {
-		t.Error("Seed not generated")
+	// Verify config was created with device ID (mnemonic comes from register/login)
+	if cfg.Mnemonic != "" {
+		t.Error("Mnemonic should be empty (obtained via register/login)")
 	}
 	if cfg.DeviceID == "" {
 		t.Error("DeviceID not generated")
@@ -188,22 +186,8 @@ func TestInitConfig(t *testing.T) {
 	if cfg.VaultDB == "" {
 		t.Error("VaultDB not set")
 	}
-
-	// Verify seed is valid hex
-	seedBytes, err := hex.DecodeString(cfg.Seed)
-	if err != nil {
-		t.Errorf("Seed is not valid hex: %v", err)
-	}
-
-	// Verify we can parse it as a seed phrase
-	_, err = vault.ParseSeedPhrase(cfg.Seed)
-	if err != nil {
-		t.Errorf("Generated seed is not a valid seed phrase: %v", err)
-	}
-
-	// Verify seed has correct length (32 bytes = 64 hex chars)
-	if len(seedBytes) != 32 {
-		t.Errorf("Seed has wrong length: got %d bytes, want 32", len(seedBytes))
+	if cfg.AppID != "sweet" {
+		t.Errorf("AppID should be 'sweet', got %s", cfg.AppID)
 	}
 
 	// Verify config file exists
@@ -216,8 +200,8 @@ func TestInitConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig failed: %v", err)
 	}
-	if loadedCfg.Seed != cfg.Seed {
-		t.Error("Loaded config seed doesn't match")
+	if loadedCfg.DeviceID != cfg.DeviceID {
+		t.Error("Loaded config DeviceID doesn't match")
 	}
 }
 
@@ -238,7 +222,7 @@ func TestConfigExists(t *testing.T) {
 		t.Fatalf("EnsureConfigDir failed: %v", err)
 	}
 	cfg := &Config{
-		Seed: "test",
+		Mnemonic: "test",
 	}
 	if err := SaveConfig(cfg); err != nil {
 		t.Fatalf("SaveConfig failed: %v", err)

@@ -1,84 +1,209 @@
-// ABOUTME: auth.go implements login, logout, and status commands for sweet CLI.
-// ABOUTME: Handles SSH-based authentication with the sync server and token management.
+// ABOUTME: Implements register, login, logout, and status commands for sweet CLI.
+// ABOUTME: Handles PocketBase email/password auth with BIP39 seed management.
 package main
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
+	"os"
+	"strings"
+	"syscall"
 	"time"
 
 	"suitesync/vault"
+
+	"golang.org/x/term"
 )
 
-// cmdLogin authenticates with the sync server and saves the token.
-func cmdLogin(args []string) error {
-	fs := flag.NewFlagSet("login", flag.ExitOnError)
-	server := fs.String("server", "", "sync server URL (overrides config)")
-	sshKey := fs.String("ssh-key", vault.DefaultSSHKeyPath(), "path to SSH private key")
-	keyPass := fs.String("key-passphrase", "", "SSH key passphrase (if encrypted)")
+const appID = "sweet"
+
+// cmdRegister creates a new account and generates recovery phrase.
+//
+//nolint:funlen // Registration flow requires many user interaction steps.
+func cmdRegister(args []string) error {
+	fs := flag.NewFlagSet("register", flag.ExitOnError)
+	server := fs.String("server", "https://api.storeusa.org", "sync server URL")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	// Load config
-	cfg, err := LoadConfig()
+	// Get email
+	fmt.Print("Email: ")
+	reader := bufio.NewReader(os.Stdin)
+	email, _ := reader.ReadString('\n')
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return fmt.Errorf("email required")
+	}
+
+	// Get password
+	fmt.Print("Password: ")
+	passwordBytes, err := term.ReadPassword(syscall.Stdin)
+	fmt.Println()
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return fmt.Errorf("read password: %w", err)
+	}
+	password := string(passwordBytes)
+
+	fmt.Print("Confirm password: ")
+	confirmBytes, err := term.ReadPassword(syscall.Stdin)
+	fmt.Println()
+	if err != nil {
+		return fmt.Errorf("read password: %w", err)
 	}
 
-	// Validate we have a seed
-	if cfg.Seed == "" {
-		return fmt.Errorf("no seed found - run 'sweet init' first")
+	if password != string(confirmBytes) {
+		return fmt.Errorf("passwords do not match")
 	}
 
-	// Use server from flag or config
+	if len(password) < 8 {
+		return fmt.Errorf("password must be at least 8 characters")
+	}
+
+	// Register with server
+	fmt.Printf("\nRegistering with %s...\n", *server)
+	client := vault.NewPBAuthClient(*server)
+	result, err := client.Register(context.Background(), email, password)
+	if err != nil {
+		return fmt.Errorf("registration failed: %w", err)
+	}
+
+	fmt.Println("\n✓ Account created!")
+	fmt.Println("\n" + strings.Repeat("=", 60))
+	fmt.Println("IMPORTANT: Save this recovery phrase in your password manager.")
+	fmt.Println("You will need it to set up other devices or apps.")
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Println()
+	fmt.Println(result.Mnemonic)
+	fmt.Println()
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Print("\nPress Enter after you've saved this phrase...")
+	_, _ = reader.ReadString('\n')
+
+	// Save config
+	cfg, _ := LoadConfig()
+	if cfg == nil {
+		cfg = &Config{}
+	}
+	cfg.Server = *server
+	cfg.Email = email
+	cfg.Token = result.Token.Token
+	cfg.TokenExpires = result.Token.Expires.Format(time.RFC3339)
+	cfg.Mnemonic = result.Mnemonic // TODO: encrypt locally
+	cfg.AppID = appID
+	if cfg.DeviceID == "" {
+		cfg.DeviceID = randHex(16)
+	}
+	if cfg.AppDB == "" {
+		cfg.AppDB = ConfigDir() + "/app.db"
+	}
+	if cfg.VaultDB == "" {
+		cfg.VaultDB = ConfigDir() + "/vault.db"
+	}
+
+	if err := SaveConfig(cfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+
+	fmt.Println("\n✓ Logged in to sweet")
+	fmt.Printf("Token expires: %s\n", result.Token.Expires.Format(time.RFC3339))
+	fmt.Println("\nPlease check your email to verify your account.")
+
+	return nil
+}
+
+// cmdLogin authenticates with email/password and mnemonic.
+//
+//nolint:funlen // Login flow requires many user interaction steps.
+func cmdLogin(args []string) error {
+	fs := flag.NewFlagSet("login", flag.ExitOnError)
+	server := fs.String("server", "", "sync server URL (overrides config)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, _ := LoadConfig()
+	if cfg == nil {
+		cfg = &Config{}
+	}
+
 	serverURL := *server
 	if serverURL == "" {
 		serverURL = cfg.Server
 	}
 	if serverURL == "" {
-		return fmt.Errorf("no server URL - use --server flag or set in config")
+		serverURL = "https://api.storeusa.org"
 	}
 
-	// Parse seed and derive keys
-	seed, err := vault.ParseSeedPhrase(cfg.Seed)
+	// Get email
+	fmt.Print("Email: ")
+	reader := bufio.NewReader(os.Stdin)
+	email, _ := reader.ReadString('\n')
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return fmt.Errorf("email required")
+	}
+
+	// Get password
+	fmt.Print("Password: ")
+	passwordBytes, err := term.ReadPassword(syscall.Stdin)
+	fmt.Println()
 	if err != nil {
-		return fmt.Errorf("parse seed: %w", err)
+		return fmt.Errorf("read password: %w", err)
 	}
-	keys, err := vault.DeriveKeys(seed, "", vault.DefaultKDFParams())
-	if err != nil {
-		return fmt.Errorf("derive keys: %w", err)
+	password := string(passwordBytes)
+
+	// Get mnemonic
+	fmt.Print("\nEnter your recovery phrase (from your password manager):\n> ")
+	mnemonic, _ := reader.ReadString('\n')
+	mnemonic = strings.TrimSpace(mnemonic)
+
+	// Validate mnemonic
+	if _, err := vault.ParseMnemonic(mnemonic); err != nil {
+		return fmt.Errorf("invalid recovery phrase: %w", err)
 	}
 
-	// Authenticate
-	fmt.Printf("Logging in to %s...\n", serverURL)
-	fmt.Printf("Using SSH key: %s\n", *sshKey)
-	fmt.Printf("User ID: %s\n\n", keys.UserID())
-
-	authClient := vault.NewAuthClient(serverURL)
-	ctx := context.Background()
-	token, err := authClient.LoginWithKeyFile(ctx, keys.UserID(), *sshKey, []byte(*keyPass), true)
+	// Login to server
+	fmt.Printf("\nLogging in to %s...\n", serverURL)
+	client := vault.NewPBAuthClient(serverURL)
+	result, err := client.Login(context.Background(), email, password)
 	if err != nil {
 		return fmt.Errorf("login failed: %w", err)
 	}
 
-	// Save token and server to config
+	// Save config
 	cfg.Server = serverURL
-	cfg.Token = token.Token
-	cfg.TokenExpires = token.Expires.Format(time.RFC3339)
+	cfg.Email = email
+	cfg.Token = result.Token.Token
+	cfg.RefreshToken = result.RefreshToken
+	cfg.TokenExpires = result.Token.Expires.Format(time.RFC3339)
+	cfg.Mnemonic = mnemonic // TODO: encrypt locally
+	cfg.AppID = appID
+	if cfg.DeviceID == "" {
+		cfg.DeviceID = randHex(16)
+	}
+	if cfg.AppDB == "" {
+		cfg.AppDB = ConfigDir() + "/app.db"
+	}
+	if cfg.VaultDB == "" {
+		cfg.VaultDB = ConfigDir() + "/vault.db"
+	}
+
 	if err := SaveConfig(cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
 
-	fmt.Println("✓ Authenticated successfully!")
-	fmt.Printf("Token expires: %s\n", token.Expires.Format(time.RFC3339))
-	fmt.Printf("Token saved to %s\n", ConfigPath())
+	fmt.Println("\n✓ Logged in to sweet")
+	fmt.Printf("Token expires: %s\n", result.Token.Expires.Format(time.RFC3339))
 
 	return nil
 }
 
-// cmdLogout clears the authentication token from config.
+// cmdLogout clears auth tokens from config.
 func cmdLogout(args []string) error {
 	fs := flag.NewFlagSet("logout", flag.ExitOnError)
 	if err := fs.Parse(args); err != nil {
@@ -96,18 +221,19 @@ func cmdLogout(args []string) error {
 	}
 
 	cfg.Token = ""
+	cfg.RefreshToken = ""
 	cfg.TokenExpires = ""
+	// Keep mnemonic - user may want to login again
+
 	if err := SaveConfig(cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
 
 	fmt.Println("✓ Logged out successfully")
-	fmt.Printf("Token cleared from %s\n", ConfigPath())
-
 	return nil
 }
 
-// cmdStatus shows current configuration and authentication status.
+// cmdStatus shows current auth status.
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	if err := fs.Parse(args); err != nil {
@@ -119,38 +245,23 @@ func cmdStatus(args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	fmt.Printf("Config path: %s\n", ConfigPath())
-	fmt.Printf("Device ID:   %s\n", cfg.DeviceID)
-	fmt.Printf("Server:      %s\n", valueOrNone(cfg.Server))
-	fmt.Printf("App DB:      %s\n", cfg.AppDB)
-	fmt.Printf("Vault DB:    %s\n", cfg.VaultDB)
+	fmt.Printf("Config:    %s\n", ConfigPath())
+	fmt.Printf("Server:    %s\n", valueOrNone(cfg.Server))
+	fmt.Printf("Email:     %s\n", valueOrNone(cfg.Email))
+	fmt.Printf("App ID:    %s\n", valueOrNone(cfg.AppID))
+	fmt.Printf("Device ID: %s\n", valueOrNone(cfg.DeviceID))
 
-	// Check if we have a seed
-	if cfg.Seed == "" {
-		fmt.Println("\nStatus: Not initialized (run 'sweet init')")
-		return nil
-	}
-
-	// Derive user ID from seed
-	seed, err := vault.ParseSeedPhrase(cfg.Seed)
-	if err != nil {
-		fmt.Printf("\nWarning: Invalid seed in config: %v\n", err)
+	if cfg.Mnemonic != "" {
+		fmt.Println("Recovery:  ✓ stored")
 	} else {
-		keys, err := vault.DeriveKeys(seed, "", vault.DefaultKDFParams())
-		if err != nil {
-			fmt.Printf("\nWarning: Failed to derive keys: %v\n", err)
-		} else {
-			fmt.Printf("User ID:     %s\n", keys.UserID())
-		}
+		fmt.Println("Recovery:  (not set)")
 	}
 
-	// Check authentication status
 	printTokenStatus(cfg)
 
 	return nil
 }
 
-// printTokenStatus prints the current token authentication status.
 func printTokenStatus(cfg *Config) {
 	if cfg.Token == "" {
 		fmt.Println("\nStatus: Not logged in")
@@ -159,27 +270,27 @@ func printTokenStatus(cfg *Config) {
 
 	fmt.Println()
 	if cfg.TokenExpires == "" {
-		fmt.Println("Token:       valid (no expiry info)")
+		fmt.Println("Token: valid (no expiry info)")
 		return
 	}
 
 	expires, err := time.Parse(time.RFC3339, cfg.TokenExpires)
 	if err != nil {
-		fmt.Printf("Token:       valid (invalid expiry format: %v)\n", err)
+		fmt.Printf("Token: valid (invalid expiry: %v)\n", err)
 		return
 	}
 
 	now := time.Now()
 	if expires.Before(now) {
-		fmt.Printf("Token:       EXPIRED (expired %s ago)\n", now.Sub(expires).Round(time.Second))
+		fmt.Printf("Token: EXPIRED (%s ago)\n", now.Sub(expires).Round(time.Second))
+		if cfg.RefreshToken != "" {
+			fmt.Println("       (has refresh token - run any command to auto-refresh)")
+		}
 	} else {
-		remaining := expires.Sub(now)
-		fmt.Printf("Token:       valid (expires in %s)\n", formatDuration(remaining))
-		fmt.Printf("             %s\n", expires.Format(time.RFC3339))
+		fmt.Printf("Token: valid (expires in %s)\n", formatDuration(expires.Sub(now)))
 	}
 }
 
-// valueOrNone returns the value or "(not set)" if empty.
 func valueOrNone(s string) string {
 	if s == "" {
 		return "(not set)"
@@ -187,7 +298,6 @@ func valueOrNone(s string) string {
 	return s
 }
 
-// formatDuration formats a duration in a human-readable way.
 func formatDuration(d time.Duration) string {
 	d = d.Round(time.Second)
 	h := d / time.Hour
@@ -197,10 +307,17 @@ func formatDuration(d time.Duration) string {
 	s := d / time.Second
 
 	if h > 0 {
-		return fmt.Sprintf("%dh %dm %ds", h, m, s)
+		return fmt.Sprintf("%dh %dm", h, m)
 	}
 	if m > 0 {
 		return fmt.Sprintf("%dm %ds", m, s)
 	}
 	return fmt.Sprintf("%ds", s)
+}
+
+// randHex returns n random bytes hex-encoded (2n chars).
+func randHex(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }

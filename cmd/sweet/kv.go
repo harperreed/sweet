@@ -28,7 +28,7 @@ func loadRuntimeConfig(args []string) (*parsedConfig, error) {
 
 	// Create runtime config with defaults from file
 	rtCfg := appcli.RuntimeConfig{
-		SeedPhrase: fileCfg.Seed,
+		SeedPhrase: fileCfg.Mnemonic,
 		VaultPath:  fileCfg.VaultDB,
 		AppDBPath:  fileCfg.AppDB,
 		DeviceID:   fileCfg.DeviceID,

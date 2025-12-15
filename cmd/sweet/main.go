@@ -29,6 +29,10 @@ func main() {
 	case "list":
 		listCmd()
 	case "register":
+		if err := cmdRegister(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+	case "old-register":
 		registerCmd()
 	case "old-login":
 		oldLoginCmd()
@@ -50,6 +54,10 @@ func main() {
 		}
 	case "init":
 		if err := cmdInit(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+	case "reset":
+		if err := cmdReset(os.Args[2:]); err != nil {
 			log.Fatal(err)
 		}
 	case "kv":
@@ -146,7 +154,7 @@ func mustParse(args []string, fs *flag.FlagSet) {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "sweet commands: summary | list | register | old-login | login | logout | status | rotate-seed | init | kv\n")
+	fmt.Fprintf(os.Stderr, "sweet commands: summary | list | register | login | logout | status | old-register | old-login | rotate-seed | init | reset | kv\n")
 }
 
 func registerCmd() {
