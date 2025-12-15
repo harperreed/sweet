@@ -112,3 +112,161 @@ func TestAuthClientRefresh(t *testing.T) {
 		t.Errorf("unexpected token: %s", result.Token.Token)
 	}
 }
+
+func TestAuthClientRegisterEmptyCredentials(t *testing.T) {
+	client := NewPBAuthClient("http://localhost:8080")
+
+	testCases := []struct {
+		name     string
+		email    string
+		password string
+	}{
+		{
+			name:     "empty email",
+			email:    "",
+			password: "password123",
+		},
+		{
+			name:     "empty password",
+			email:    "test@example.com",
+			password: "",
+		},
+		{
+			name:     "both empty",
+			email:    "",
+			password: "",
+		},
+		{
+			name:     "whitespace email",
+			email:    "   ",
+			password: "password123",
+		},
+		{
+			name:     "whitespace password",
+			email:    "test@example.com",
+			password: "   ",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := client.Register(context.Background(), tc.email, tc.password)
+			if err == nil {
+				t.Fatal("expected error for empty credentials, got nil")
+			}
+			if err.Error() != "email and password required" {
+				t.Errorf("unexpected error message: %v", err)
+			}
+		})
+	}
+}
+
+func TestAuthClientLoginServerError(t *testing.T) {
+	testCases := []struct {
+		name           string
+		statusCode     int
+		responseBody   map[string]string
+		expectedErrMsg string
+	}{
+		{
+			name:           "401 unauthorized",
+			statusCode:     http.StatusUnauthorized,
+			responseBody:   map[string]string{"error": "invalid credentials"},
+			expectedErrMsg: "login failed: invalid credentials",
+		},
+		{
+			name:           "409 conflict",
+			statusCode:     http.StatusConflict,
+			responseBody:   map[string]string{"error": "user already exists"},
+			expectedErrMsg: "login failed: user already exists",
+		},
+		{
+			name:           "500 internal server error",
+			statusCode:     http.StatusInternalServerError,
+			responseBody:   map[string]string{"error": "database error"},
+			expectedErrMsg: "login failed: database error",
+		},
+		{
+			name:           "503 service unavailable",
+			statusCode:     http.StatusServiceUnavailable,
+			responseBody:   map[string]string{},
+			expectedErrMsg: "login failed: 503 Service Unavailable",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.statusCode)
+				if len(tc.responseBody) > 0 {
+					_ = json.NewEncoder(w).Encode(tc.responseBody)
+				}
+			}))
+			defer server.Close()
+
+			client := NewPBAuthClient(server.URL)
+			_, err := client.Login(context.Background(), "test@example.com", "password123")
+			if err == nil {
+				t.Fatal("expected error for server error, got nil")
+			}
+			if err.Error() != tc.expectedErrMsg {
+				t.Errorf("unexpected error message:\ngot:  %v\nwant: %v", err.Error(), tc.expectedErrMsg)
+			}
+		})
+	}
+}
+
+func TestAuthClientRefreshInvalidToken(t *testing.T) {
+	t.Run("empty token", func(t *testing.T) {
+		client := NewPBAuthClient("http://localhost:8080")
+		_, err := client.Refresh(context.Background(), "")
+		if err == nil {
+			t.Fatal("expected error for empty token, got nil")
+		}
+		if err.Error() != "refresh token required" {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("invalid token format", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid refresh token"})
+		}))
+		defer server.Close()
+
+		client := NewPBAuthClient(server.URL)
+		_, err := client.Refresh(context.Background(), "invalid_token")
+		if err == nil || err.Error() != "refresh failed: invalid refresh token" {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("expired token", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "refresh token expired"})
+		}))
+		defer server.Close()
+
+		client := NewPBAuthClient(server.URL)
+		_, err := client.Refresh(context.Background(), "expired_token")
+		if err == nil || err.Error() != "refresh failed: refresh token expired" {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("revoked token", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "refresh token revoked"})
+		}))
+		defer server.Close()
+
+		client := NewPBAuthClient(server.URL)
+		_, err := client.Refresh(context.Background(), "revoked_token")
+		if err == nil || err.Error() != "refresh failed: refresh token revoked" {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+}
