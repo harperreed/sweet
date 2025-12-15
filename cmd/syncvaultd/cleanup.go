@@ -15,23 +15,63 @@ type CleanupStats struct {
 	challenges int64
 }
 
+const cleanupBatchSize = 1000
+
 // cleanupExpired deletes expired tokens and challenges, returning counts.
-func (s *Server) cleanupExpired(ctx context.Context) CleanupStats {
+//
+//nolint:nestif,unparam // Cleanup needs nested loops for batch deletion; ctx reserved for future use.
+func (s *Server) cleanupExpired(_ context.Context) CleanupStats {
 	now := time.Now().Unix()
 	var stats CleanupStats
 
-	res, err := s.db.ExecContext(ctx, `DELETE FROM tokens WHERE expires_at < ?`, now)
+	// Clean up expired tokens (loop until all deleted)
+	tokensCol, err := s.app.FindCollectionByNameOrId("sync_tokens")
 	if err != nil {
-		log.Printf("cleanup tokens error: %v", err)
-	} else if n, _ := res.RowsAffected(); n > 0 {
-		stats.tokens = n
+		log.Printf("cleanup: find tokens collection error: %v", err)
+	} else {
+		for {
+			expiredTokens, err := s.app.FindRecordsByFilter(tokensCol, "expires_at < {:now}", "", cleanupBatchSize, 0,
+				map[string]any{"now": now})
+			if err != nil {
+				log.Printf("cleanup: query expired tokens error: %v", err)
+				break
+			}
+			if len(expiredTokens) == 0 {
+				break
+			}
+			for _, t := range expiredTokens {
+				if err := s.app.Delete(t); err != nil {
+					log.Printf("cleanup: delete token error: %v", err)
+				} else {
+					stats.tokens++
+				}
+			}
+		}
 	}
 
-	res, err = s.db.ExecContext(ctx, `DELETE FROM challenges WHERE expires_at < ?`, now)
+	// Clean up expired challenges (loop until all deleted)
+	challengesCol, err := s.app.FindCollectionByNameOrId("sync_challenges")
 	if err != nil {
-		log.Printf("cleanup challenges error: %v", err)
-	} else if n, _ := res.RowsAffected(); n > 0 {
-		stats.challenges = n
+		log.Printf("cleanup: find challenges collection error: %v", err)
+	} else {
+		for {
+			expiredChallenges, err := s.app.FindRecordsByFilter(challengesCol, "expires_at < {:now}", "", cleanupBatchSize, 0,
+				map[string]any{"now": now})
+			if err != nil {
+				log.Printf("cleanup: query expired challenges error: %v", err)
+				break
+			}
+			if len(expiredChallenges) == 0 {
+				break
+			}
+			for _, c := range expiredChallenges {
+				if err := s.app.Delete(c); err != nil {
+					log.Printf("cleanup: delete challenge error: %v", err)
+				} else {
+					stats.challenges++
+				}
+			}
+		}
 	}
 
 	return stats

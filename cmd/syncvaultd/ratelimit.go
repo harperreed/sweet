@@ -1,9 +1,11 @@
-// ABOUTME: Per-user rate limiting using token bucket algorithm.
+// ABOUTME: Per-user and per-IP rate limiting using token bucket algorithm.
 // ABOUTME: Protects server from runaway clients and abuse.
 
 package main
 
 import (
+	"net"
+	"net/http"
 	"sync"
 	"time"
 
@@ -22,6 +24,14 @@ func DefaultRateLimitConfig() RateLimitConfig {
 	return RateLimitConfig{
 		Interval: 600 * time.Millisecond,
 		Burst:    10,
+	}
+}
+
+// AuthRateLimitConfig returns stricter limits for auth endpoints (~10 req/min).
+func AuthRateLimitConfig() RateLimitConfig {
+	return RateLimitConfig{
+		Interval: 6 * time.Second,
+		Burst:    5,
 	}
 }
 
@@ -77,4 +87,32 @@ func (s *rateLimiterStore) setConfig(interval time.Duration, burst int) {
 	s.config = RateLimitConfig{Interval: interval, Burst: burst}
 	// Clear existing limiters so they pick up new config
 	s.limiters = make(map[string]*rate.Limiter)
+}
+
+// getClientIP extracts client IP from request, handling X-Forwarded-For header.
+func getClientIP(r *http.Request) string {
+	// Check X-Forwarded-For header (first IP in chain is the client)
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// Take the first IP in the list
+		if idx := len(xff); idx > 0 {
+			for i, c := range xff {
+				if c == ',' {
+					return xff[:i]
+				}
+			}
+			return xff
+		}
+	}
+
+	// Check X-Real-IP header
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		return xri
+	}
+
+	// Fall back to RemoteAddr
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
 }

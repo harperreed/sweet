@@ -8,7 +8,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-	"time"
+
+	"github.com/pocketbase/pocketbase/core"
 )
 
 type snapshotReq struct {
@@ -46,38 +47,30 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use transaction to prevent race conditions
-	tx, err := s.db.BeginTx(r.Context(), nil)
-	if err != nil {
-		fail(w, http.StatusInternalServerError, "db error")
-		return
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
 	// Get current max seq for this user/entity
-	var maxSeq int64
-	err = tx.QueryRowContext(r.Context(), `
-SELECT COALESCE(MAX(seq), 0) FROM changes WHERE user_id=? AND entity=?
-`, req.UserID, req.Entity).Scan(&maxSeq)
+	maxSeq, err := s.getMaxSeqForEntity(req.UserID, req.Entity)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "db error")
 		return
 	}
 
 	snapshotID := randHex(16)
-	now := time.Now().Unix()
 
-	if _, err := tx.ExecContext(r.Context(), `
-INSERT INTO snapshots(snapshot_id, user_id, entity, created_at, min_seq, nonce_b64, ct_b64)
-VALUES(?,?,?,?,?,?,?)
-`, snapshotID, req.UserID, req.Entity, now, maxSeq, req.Env.NonceB64, req.Env.CTB64); err != nil {
-		fail(w, http.StatusInternalServerError, "db error")
+	snapshotsCol, err := s.app.FindCollectionByNameOrId("sync_snapshots")
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "collection not found")
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
+	record := core.NewRecord(snapshotsCol)
+	record.Set("snapshot_id", snapshotID)
+	record.Set("user_id", req.UserID)
+	record.Set("entity", req.Entity)
+	record.Set("min_seq", maxSeq)
+	record.Set("nonce_b64", req.Env.NonceB64)
+	record.Set("ct_b64", req.Env.CTB64)
+
+	if err := s.app.Save(record); err != nil {
 		fail(w, http.StatusInternalServerError, "db error")
 		return
 	}
@@ -85,26 +78,45 @@ VALUES(?,?,?,?,?,?,?)
 	ok(w, snapshotResp{SnapshotID: snapshotID, MinSeq: maxSeq})
 }
 
-type snapshotInfo struct {
-	SnapshotID string   `json:"snapshot_id"`
-	MinSeq     int64    `json:"min_seq"`
-	CreatedAt  int64    `json:"created_at"`
-	Env        envelope `json:"env"`
+func (s *Server) getMaxSeqForEntity(userID, entity string) (int64, error) {
+	changesCol, err := s.app.FindCollectionByNameOrId("sync_changes")
+	if err != nil {
+		return 0, err
+	}
+	records, err := s.app.FindRecordsByFilter(changesCol, "user_id = {:user_id} && entity = {:entity}", "-seq", 1, 0,
+		map[string]any{"user_id": userID, "entity": entity})
+	if err != nil {
+		return 0, nil //nolint:nilerr // No records is valid; return 0 seq.
+	}
+	if len(records) == 0 {
+		return 0, nil
+	}
+	return int64(records[0].GetInt("seq")), nil
 }
 
-func (s *Server) getLatestSnapshot(ctx context.Context, userID, entity string) (*snapshotInfo, error) {
-	var info snapshotInfo
-	err := s.db.QueryRowContext(ctx, `
-SELECT snapshot_id, min_seq, created_at, nonce_b64, ct_b64
-FROM snapshots
-WHERE user_id=? AND entity=?
-ORDER BY created_at DESC
-LIMIT 1
-`, userID, entity).Scan(&info.SnapshotID, &info.MinSeq, &info.CreatedAt, &info.Env.NonceB64, &info.Env.CTB64)
+//nolint:unparam // ctx reserved for future use.
+func (s *Server) getLatestSnapshot(_ context.Context, userID, entity string) (*snapshotInfo, error) {
+	snapshotsCol, err := s.app.FindCollectionByNameOrId("sync_snapshots")
 	if err != nil {
 		return nil, err
 	}
-	return &info, nil
+	records, err := s.app.FindRecordsByFilter(snapshotsCol, "user_id = {:user_id} && entity = {:entity}", "-min_seq", 1, 0,
+		map[string]any{"user_id": userID, "entity": entity})
+	if err != nil || len(records) == 0 {
+		return nil, err
+	}
+
+	r := records[0]
+	info := &snapshotInfo{
+		SnapshotID: r.GetString("snapshot_id"),
+		MinSeq:     int64(r.GetInt("min_seq")),
+		CreatedAt:  r.GetDateTime("created").Time().Unix(),
+		Env: envelope{
+			NonceB64: r.GetString("nonce_b64"),
+			CTB64:    r.GetString("ct_b64"),
+		},
+	}
+	return info, nil
 }
 
 func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
@@ -128,14 +140,27 @@ func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Delete changes older than snapshot (exclusive boundary)
-	res, err := s.db.ExecContext(r.Context(), `
-DELETE FROM changes WHERE user_id=? AND entity=? AND seq < ?
-`, authUser, entity, snapshot.MinSeq)
+	changesCol, err := s.app.FindCollectionByNameOrId("sync_changes")
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "collection not found")
+		return
+	}
+
+	// Find and delete changes with seq < min_seq
+	toDelete, err := s.app.FindRecordsByFilter(changesCol,
+		"user_id = {:user_id} && entity = {:entity} && seq < {:min_seq}", "", 10000, 0,
+		map[string]any{"user_id": authUser, "entity": entity, "min_seq": snapshot.MinSeq})
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "db error")
 		return
 	}
 
-	deleted, _ := res.RowsAffected()
+	var deleted int64
+	for _, rec := range toDelete {
+		if err := s.app.Delete(rec); err == nil {
+			deleted++
+		}
+	}
+
 	ok(w, map[string]any{"ok": true, "deleted_changes": deleted})
 }

@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -16,11 +15,12 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/pocketbase/pocketbase/core"
+	"github.com/pocketbase/pocketbase/tests"
 
 	"golang.org/x/crypto/ssh"
 
-	"suitesync/internal/pocketbase"
+	pbclient "suitesync/internal/pocketbase"
 	"suitesync/vault"
 )
 
@@ -42,19 +42,18 @@ type serverTestEnv struct {
 }
 
 func newServerTestEnv(t *testing.T) *serverTestEnv {
-	return newServerTestEnvWithPB(t, pocketbase.NoopClient{})
+	return newServerTestEnvWithPB(t, pbclient.NoopClient{})
 }
 
-func newServerTestEnvWithPB(t *testing.T, pb pocketbase.Client) *serverTestEnv {
+func newServerTestEnvWithPB(t *testing.T, pb pbclient.Client) *serverTestEnv {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db := openTestDatabase(t, filepath.Join(dir, "syncvault.sqlite"))
+	app := createTestApp(t, dir)
 	srv := &Server{
-		db:       db,
+		app:      app,
 		pbClient: pb,
 		limiters: newRateLimiterStore(DefaultRateLimitConfig()),
 	}
-	migrateServer(t, srv)
 	ts := startTestServer(t, srv)
 	keys, signer := generateKeysAndSigner(t)
 	if init, ok := pb.(pocketbaseAccountInitializer); ok {
@@ -74,27 +73,240 @@ func newServerTestEnvWithPB(t *testing.T, pb pocketbase.Client) *serverTestEnv {
 	}
 }
 
-func openTestDatabase(t *testing.T, path string) *sql.DB {
-	db, err := sql.Open("sqlite", path)
+//nolint:unparam // dir parameter available for custom test data paths if needed.
+func createTestApp(t *testing.T, _ string) core.App {
+	t.Helper()
+	// Create a test PocketBase app without existing test data
+	testApp, err := tests.NewTestApp()
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf("new test app: %v", err)
 	}
+
+	// Run our custom schema migrations
+	if err := runTestMigrations(testApp); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
 	t.Cleanup(func() {
-		if cerr := db.Close(); cerr != nil {
-			t.Fatalf("close db: %v", cerr)
-		}
+		testApp.Cleanup()
 	})
-	return db
+
+	return testApp
 }
 
-func migrateServer(t *testing.T, srv *Server) {
-	if err := srv.migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
+//nolint:funlen // Test migrations need to set up complete schema.
+func runTestMigrations(app core.App) error {
+	// Check if collections already exist (via migrations import)
+	if _, err := app.FindCollectionByNameOrId("sync_users"); err == nil {
+		// Collections already exist from migrations, skip manual creation
+		return nil
 	}
+
+	// Create sync_users collection
+	syncUsers := core.NewBaseCollection("sync_users")
+	syncUsers.Fields.Add(
+		&core.TextField{
+			Name:     "user_id",
+			Required: true,
+		},
+	)
+	syncUsers.AddIndex("idx_sync_users_user_id", true, "user_id", "")
+	if err := app.Save(syncUsers); err != nil {
+		return err
+	}
+
+	// Create sync_devices collection
+	syncDevices := core.NewBaseCollection("sync_devices")
+	syncDevices.Fields.Add(
+		&core.TextField{
+			Name:     "device_id",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "user_id",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "ssh_pubkey",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "ssh_pubkey_fp",
+			Required: true,
+		},
+		&core.TextField{
+			Name: "name",
+		},
+		&core.NumberField{
+			Name: "last_used_at",
+		},
+	)
+	syncDevices.AddIndex("idx_sync_devices_device_id", true, "device_id", "")
+	syncDevices.AddIndex("idx_sync_devices_ssh_pubkey_fp", true, "ssh_pubkey_fp", "")
+	syncDevices.AddIndex("idx_sync_devices_user_id", false, "user_id", "")
+	if err := app.Save(syncDevices); err != nil {
+		return err
+	}
+
+	// Create sync_challenges collection
+	syncChallenges := core.NewBaseCollection("sync_challenges")
+	syncChallenges.Fields.Add(
+		&core.TextField{
+			Name:     "challenge_id",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "user_id",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "challenge",
+			Required: true,
+		},
+		&core.NumberField{
+			Name:     "expires_at",
+			Required: true,
+		},
+	)
+	syncChallenges.AddIndex("idx_sync_challenges_challenge_id", true, "challenge_id", "")
+	syncChallenges.AddIndex("idx_sync_challenges_user_exp", false, "user_id, expires_at", "")
+	if err := app.Save(syncChallenges); err != nil {
+		return err
+	}
+
+	// Create sync_tokens collection
+	syncTokens := core.NewBaseCollection("sync_tokens")
+	syncTokens.Fields.Add(
+		&core.TextField{
+			Name:     "token_hash",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "user_id",
+			Required: true,
+		},
+		&core.TextField{
+			Name: "device_id",
+		},
+		&core.NumberField{
+			Name:     "expires_at",
+			Required: true,
+		},
+	)
+	syncTokens.AddIndex("idx_sync_tokens_token_hash", true, "token_hash", "")
+	syncTokens.AddIndex("idx_sync_tokens_device", false, "device_id", "")
+	syncTokens.AddIndex("idx_sync_tokens_user_exp", false, "user_id, expires_at", "")
+	if err := app.Save(syncTokens); err != nil {
+		return err
+	}
+
+	// Create sync_changes collection
+	syncChanges := core.NewBaseCollection("sync_changes")
+	syncChanges.Fields.Add(
+		&core.NumberField{
+			Name:     "seq",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "user_id",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "change_id",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "device_id",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "entity",
+			Required: true,
+		},
+		&core.NumberField{
+			Name:     "ts",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "nonce_b64",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "ct_b64",
+			Required: true,
+		},
+	)
+	syncChanges.AddIndex("idx_sync_changes_user_change", true, "user_id, change_id", "")
+	syncChanges.AddIndex("idx_sync_changes_user_seq", false, "user_id, seq", "")
+	if err := app.Save(syncChanges); err != nil {
+		return err
+	}
+
+	// Create sync_snapshots collection
+	syncSnapshots := core.NewBaseCollection("sync_snapshots")
+	syncSnapshots.Fields.Add(
+		&core.TextField{
+			Name:     "snapshot_id",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "user_id",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "entity",
+			Required: true,
+		},
+		&core.NumberField{
+			Name:     "min_seq",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "nonce_b64",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "ct_b64",
+			Required: true,
+		},
+	)
+	syncSnapshots.AddIndex("idx_sync_snapshots_snapshot_id", true, "snapshot_id", "")
+	syncSnapshots.AddIndex("idx_sync_snapshots_user_entity", false, "user_id, entity", "")
+	if err := app.Save(syncSnapshots); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func startTestServer(t *testing.T, srv *Server) *httptest.Server {
-	ts := httptest.NewServer(srv.handler())
+	// Create an HTTP handler that uses our routes
+	mux := http.NewServeMux()
+
+	// Healthz
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Auth endpoints
+	mux.HandleFunc("/v1/auth/register", srv.handleRegister)
+	mux.HandleFunc("/v1/auth/challenge", srv.handleChallenge)
+	mux.HandleFunc("/v1/auth/verify", srv.handleVerify)
+
+	// Sync endpoints (protected)
+	mux.HandleFunc("/v1/sync/push", srv.withAuth(srv.handlePush))
+	mux.HandleFunc("/v1/sync/pull", srv.withAuth(srv.handlePull))
+	mux.HandleFunc("/v1/sync/snapshot", srv.withAuth(srv.handleSnapshot))
+	mux.HandleFunc("/v1/sync/compact", srv.withAuth(srv.handleCompact))
+
+	// Device management (protected)
+	mux.HandleFunc("/v1/devices", srv.withAuth(srv.handleListDevices))
+	mux.HandleFunc("/v1/devices/", srv.withAuth(srv.handleRevokeDevice))
+
+	// Account management (protected)
+	mux.HandleFunc("/v1/account/migrate", srv.withAuth(srv.handleMigrate))
+
+	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	return ts
 }
@@ -228,17 +440,16 @@ func TestPushIncrementsPocketBaseUsage(t *testing.T) {
 func TestVerifyFailsWhenPocketBaseInactive(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db := openTestDatabase(t, filepath.Join(dir, "syncvault.sqlite"))
+	app := createTestApp(t, dir)
 
 	pb := &mockPocketBaseClient{
-		account:    pocketbase.AccountInfo{Active: false},
+		account:    pbclient.AccountInfo{Active: false},
 		accountSet: true,
 	}
 
-	srv := &Server{db: db, pbClient: pb}
-	migrateServer(t, srv)
+	srv := &Server{app: app, pbClient: pb}
 
-	userID, chID, sigB64 := setupTestDeviceAndChallenge(t, db)
+	userID, chID, sigB64 := setupTestDeviceAndChallenge(t, app)
 
 	resp, status, err := srv.processVerify(ctx, verifyReq{
 		UserID:       userID,
@@ -250,7 +461,7 @@ func TestVerifyFailsWhenPocketBaseInactive(t *testing.T) {
 	}
 }
 
-func setupTestDeviceAndChallenge(t *testing.T, db *sql.DB) (userID, chID, sigB64 string) {
+func setupTestDeviceAndChallenge(t *testing.T, app core.App) (userID, chID, sigB64 string) {
 	t.Helper()
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	signer, _ := ssh.NewSignerFromKey(priv)
@@ -258,20 +469,46 @@ func setupTestDeviceAndChallenge(t *testing.T, db *sql.DB) (userID, chID, sigB64
 	fp := ssh.FingerprintSHA256(signer.PublicKey())
 	userID = "user-test"
 	deviceID := "device-test"
-	now := time.Now().Unix()
 
-	if _, err := db.Exec(`INSERT INTO users(user_id, created_at) VALUES(?,?)`, userID, now); err != nil {
+	// Create user
+	usersCol, err := app.FindCollectionByNameOrId("sync_users")
+	if err != nil {
+		t.Fatalf("find users collection: %v", err)
+	}
+	userRecord := core.NewRecord(usersCol)
+	userRecord.Set("user_id", userID)
+	if err := app.Save(userRecord); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO devices(device_id, user_id, ssh_pubkey, ssh_pubkey_fp, name, created_at) VALUES(?,?,?,?,?,?)`,
-		deviceID, userID, pubStr, fp, "test-device", now); err != nil {
+
+	// Create device
+	devicesCol, err := app.FindCollectionByNameOrId("sync_devices")
+	if err != nil {
+		t.Fatalf("find devices collection: %v", err)
+	}
+	deviceRecord := core.NewRecord(devicesCol)
+	deviceRecord.Set("device_id", deviceID)
+	deviceRecord.Set("user_id", userID)
+	deviceRecord.Set("ssh_pubkey", pubStr)
+	deviceRecord.Set("ssh_pubkey_fp", fp)
+	deviceRecord.Set("name", "test-device")
+	if err := app.Save(deviceRecord); err != nil {
 		t.Fatalf("insert device: %v", err)
 	}
 
+	// Create challenge
 	chID = "challenge-1"
 	challenge := []byte("challenge-bytes")
-	if _, err := db.Exec(`INSERT INTO challenges(challenge_id, user_id, challenge, expires_at) VALUES(?,?,?,?)`,
-		chID, userID, challenge, time.Now().Add(time.Minute).Unix()); err != nil {
+	challengesCol, err := app.FindCollectionByNameOrId("sync_challenges")
+	if err != nil {
+		t.Fatalf("find challenges collection: %v", err)
+	}
+	challengeRecord := core.NewRecord(challengesCol)
+	challengeRecord.Set("challenge_id", chID)
+	challengeRecord.Set("user_id", userID)
+	challengeRecord.Set("challenge", base64.StdEncoding.EncodeToString(challenge))
+	challengeRecord.Set("expires_at", time.Now().Add(time.Minute).Unix())
+	if err := app.Save(challengeRecord); err != nil {
 		t.Fatalf("insert challenge: %v", err)
 	}
 
@@ -281,7 +518,7 @@ func setupTestDeviceAndChallenge(t *testing.T, db *sql.DB) (userID, chID, sigB64
 }
 
 type mockPocketBaseClient struct {
-	account    pocketbase.AccountInfo
+	account    pbclient.AccountInfo
 	accountSet bool
 	accountErr error
 	increments []usageRecord
@@ -292,12 +529,12 @@ type usageRecord struct {
 	changes int
 }
 
-func (m *mockPocketBaseClient) GetAccountByUserID(ctx context.Context, userID string) (pocketbase.AccountInfo, error) {
+func (m *mockPocketBaseClient) GetAccountByUserID(ctx context.Context, userID string) (pbclient.AccountInfo, error) {
 	if m.accountErr != nil {
-		return pocketbase.AccountInfo{}, m.accountErr
+		return pbclient.AccountInfo{}, m.accountErr
 	}
 	if !m.accountSet {
-		return pocketbase.AccountInfo{UserID: userID, Active: true}, nil
+		return pbclient.AccountInfo{UserID: userID, Active: true}, nil
 	}
 	acc := m.account
 	if acc.UserID == "" {
@@ -320,7 +557,7 @@ func (m *mockPocketBaseClient) MigrateUserID(ctx context.Context, oldUserID, new
 
 func (m *mockPocketBaseClient) ensureAccount(userID string) {
 	if !m.accountSet {
-		m.account = pocketbase.AccountInfo{UserID: userID, Active: true}
+		m.account = pbclient.AccountInfo{UserID: userID, Active: true}
 		m.accountSet = true
 	}
 }
@@ -329,41 +566,63 @@ func (e *serverTestEnv) setRateLimit(interval time.Duration, burst int) {
 	e.srv.limiters.setConfig(interval, burst)
 }
 
+//nolint:funlen // Cleanup test needs comprehensive setup and verification.
 func TestCleanupPurgesExpiredTokensAndChallenges(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "test.sqlite"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer func() {
-		if err := db.Close(); err != nil {
-			t.Fatalf("close db: %v", err)
-		}
-	}()
+	app := createTestApp(t, dir)
 
-	srv := &Server{db: db, pbClient: pocketbase.NoopClient{}}
-	if err := srv.migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	srv := &Server{app: app, pbClient: pbclient.NoopClient{}}
 
 	now := time.Now().Unix()
 	expired := now - 3600 // 1 hour ago
 	valid := now + 3600   // 1 hour from now
 
 	// Insert expired and valid tokens
-	if _, err := db.Exec(`INSERT INTO tokens(token_hash, user_id, expires_at) VALUES('expired1', 'user1', ?)`, expired); err != nil {
+	tokensCol, err := app.FindCollectionByNameOrId("sync_tokens")
+	if err != nil {
+		t.Fatalf("find tokens collection: %v", err)
+	}
+
+	expiredToken := core.NewRecord(tokensCol)
+	expiredToken.Set("token_hash", "expired1")
+	expiredToken.Set("user_id", "user1")
+	expiredToken.Set("device_id", "")
+	expiredToken.Set("expires_at", expired)
+	if err := app.Save(expiredToken); err != nil {
 		t.Fatalf("insert expired token: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO tokens(token_hash, user_id, expires_at) VALUES('valid1', 'user1', ?)`, valid); err != nil {
+
+	validToken := core.NewRecord(tokensCol)
+	validToken.Set("token_hash", "valid1")
+	validToken.Set("user_id", "user1")
+	validToken.Set("device_id", "")
+	validToken.Set("expires_at", valid)
+	if err := app.Save(validToken); err != nil {
 		t.Fatalf("insert valid token: %v", err)
 	}
 
 	// Insert expired and valid challenges
-	if _, err := db.Exec(`INSERT INTO challenges(challenge_id, user_id, challenge, expires_at) VALUES('ch-expired', 'user1', X'00', ?)`, expired); err != nil {
+	challengesCol, err := app.FindCollectionByNameOrId("sync_challenges")
+	if err != nil {
+		t.Fatalf("find challenges collection: %v", err)
+	}
+
+	expiredChallenge := core.NewRecord(challengesCol)
+	expiredChallenge.Set("challenge_id", "ch-expired")
+	expiredChallenge.Set("user_id", "user1")
+	expiredChallenge.Set("challenge", base64.StdEncoding.EncodeToString([]byte{0x00}))
+	expiredChallenge.Set("expires_at", expired)
+	if err := app.Save(expiredChallenge); err != nil {
 		t.Fatalf("insert expired challenge: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO challenges(challenge_id, user_id, challenge, expires_at) VALUES('ch-valid', 'user1', X'00', ?)`, valid); err != nil {
+
+	validChallenge := core.NewRecord(challengesCol)
+	validChallenge.Set("challenge_id", "ch-valid")
+	validChallenge.Set("user_id", "user1")
+	validChallenge.Set("challenge", base64.StdEncoding.EncodeToString([]byte{0x00}))
+	validChallenge.Set("expires_at", valid)
+	if err := app.Save(validChallenge); err != nil {
 		t.Fatalf("insert valid challenge: %v", err)
 	}
 
@@ -378,18 +637,20 @@ func TestCleanupPurgesExpiredTokensAndChallenges(t *testing.T) {
 	}
 
 	// Verify valid records remain
-	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM tokens`).Scan(&count); err != nil {
-		t.Fatalf("count tokens: %v", err)
+	remainingTokens, err := app.FindRecordsByFilter(tokensCol, "", "", 100, 0, nil)
+	if err != nil {
+		t.Fatalf("query tokens: %v", err)
 	}
-	if count != 1 {
-		t.Errorf("expected 1 token remaining, got %d", count)
+	if len(remainingTokens) != 1 {
+		t.Errorf("expected 1 token remaining, got %d", len(remainingTokens))
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM challenges`).Scan(&count); err != nil {
-		t.Fatalf("count challenges: %v", err)
+
+	remainingChallenges, err := app.FindRecordsByFilter(challengesCol, "", "", 100, 0, nil)
+	if err != nil {
+		t.Fatalf("query challenges: %v", err)
 	}
-	if count != 1 {
-		t.Errorf("expected 1 challenge remaining, got %d", count)
+	if len(remainingChallenges) != 1 {
+		t.Errorf("expected 1 challenge remaining, got %d", len(remainingChallenges))
 	}
 }
 
@@ -433,13 +694,12 @@ func TestRateLimitRejects429(t *testing.T) {
 func TestMultipleDevicesCanAuthenticate(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db := openTestDatabase(t, filepath.Join(dir, "syncvault.sqlite"))
+	app := createTestApp(t, dir)
 	srv := &Server{
-		db:       db,
-		pbClient: pocketbase.NoopClient{},
+		app:      app,
+		pbClient: pbclient.NoopClient{},
 		limiters: newRateLimiterStore(DefaultRateLimitConfig()),
 	}
-	migrateServer(t, srv)
 	ts := startTestServer(t, srv)
 
 	keys, _ := generateKeysAndSigner(t)
@@ -552,13 +812,12 @@ func TestListDevices(t *testing.T) {
 func TestRevokeDevice(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db := openTestDatabase(t, filepath.Join(dir, "syncvault.sqlite"))
+	app := createTestApp(t, dir)
 	srv := &Server{
-		db:       db,
-		pbClient: pocketbase.NoopClient{},
+		app:      app,
+		pbClient: pbclient.NoopClient{},
 		limiters: newRateLimiterStore(DefaultRateLimitConfig()),
 	}
-	migrateServer(t, srv)
 	ts := startTestServer(t, srv)
 
 	keys, _ := generateKeysAndSigner(t)
@@ -665,12 +924,19 @@ func TestSnapshotAndPrune(t *testing.T) {
 
 func testCompaction(t *testing.T, env *serverTestEnv) {
 	t.Helper()
+	app := env.srv.app
 
 	// Get the snapshot's min_seq (should be 5 after pushing 5 changes)
-	var snapshotMinSeq int64
-	if err := env.srv.db.QueryRow(`SELECT min_seq FROM snapshots WHERE user_id=? AND entity=? ORDER BY created_at DESC LIMIT 1`, env.userID, "todo").Scan(&snapshotMinSeq); err != nil {
-		t.Fatalf("query snapshot min_seq: %v", err)
+	snapshotsCol, err := app.FindCollectionByNameOrId("sync_snapshots")
+	if err != nil {
+		t.Fatalf("find snapshots collection: %v", err)
 	}
+	snapshots, err := app.FindRecordsByFilter(snapshotsCol, "user_id = {:user_id} && entity = {:entity}", "-min_seq", 1, 0,
+		map[string]any{"user_id": env.userID, "entity": "todo"})
+	if err != nil || len(snapshots) == 0 {
+		t.Fatalf("query snapshot: %v", err)
+	}
+	snapshotMinSeq := int64(snapshots[0].GetInt("min_seq"))
 	if snapshotMinSeq != 5 {
 		t.Fatalf("expected snapshot min_seq=5, got %d", snapshotMinSeq)
 	}
@@ -685,21 +951,27 @@ func testCompaction(t *testing.T, env *serverTestEnv) {
 	}
 
 	// Verify old changes (seq < 5) were deleted
-	var oldCount int
-	if err := env.srv.db.QueryRow(`SELECT COUNT(*) FROM changes WHERE user_id=? AND entity=? AND seq < ?`, env.userID, "todo", snapshotMinSeq).Scan(&oldCount); err != nil {
+	changesCol, err := app.FindCollectionByNameOrId("sync_changes")
+	if err != nil {
+		t.Fatalf("find changes collection: %v", err)
+	}
+	oldChanges, err := app.FindRecordsByFilter(changesCol, "user_id = {:user_id} && entity = {:entity} && seq < {:seq}", "", 100, 0,
+		map[string]any{"user_id": env.userID, "entity": "todo", "seq": snapshotMinSeq})
+	if err != nil {
 		t.Fatalf("query old changes: %v", err)
 	}
-	if oldCount != 0 {
-		t.Errorf("expected 0 old changes (seq < %d), got %d", snapshotMinSeq, oldCount)
+	if len(oldChanges) != 0 {
+		t.Errorf("expected 0 old changes (seq < %d), got %d", snapshotMinSeq, len(oldChanges))
 	}
 
 	// Verify changes at boundary and newer (seq >= 5) still exist (5, 6, 7, 8 = 4 changes)
-	var newCount int
-	if err := env.srv.db.QueryRow(`SELECT COUNT(*) FROM changes WHERE user_id=? AND entity=? AND seq >= ?`, env.userID, "todo", snapshotMinSeq).Scan(&newCount); err != nil {
+	newChanges, err := app.FindRecordsByFilter(changesCol, "user_id = {:user_id} && entity = {:entity} && seq >= {:seq}", "", 100, 0,
+		map[string]any{"user_id": env.userID, "entity": "todo", "seq": snapshotMinSeq})
+	if err != nil {
 		t.Fatalf("query new changes: %v", err)
 	}
-	if newCount != 4 {
-		t.Errorf("expected 4 changes (seq >= %d), got %d", snapshotMinSeq, newCount)
+	if len(newChanges) != 4 {
+		t.Errorf("expected 4 changes (seq >= %d), got %d", snapshotMinSeq, len(newChanges))
 	}
 }
 
@@ -822,13 +1094,12 @@ func TestRateLimiterWithZeroIntervalInServer(t *testing.T) {
 func TestCannotRevokeSelf(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db := openTestDatabase(t, filepath.Join(dir, "syncvault.sqlite"))
+	app := createTestApp(t, dir)
 	srv := &Server{
-		db:       db,
-		pbClient: pocketbase.NoopClient{},
+		app:      app,
+		pbClient: pbclient.NoopClient{},
 		limiters: newRateLimiterStore(DefaultRateLimitConfig()),
 	}
-	migrateServer(t, srv)
 	ts := startTestServer(t, srv)
 
 	keys, _ := generateKeysAndSigner(t)
@@ -892,46 +1163,45 @@ func getFirstDeviceID(t *testing.T, baseURL, token string) string {
 	return body.Devices[0].DeviceID
 }
 
-func TestSchemaPreventsSQLInjectionNullDeviceID(t *testing.T) {
-	ctx := context.Background()
+func TestSchemaAllowsEmptyDeviceID(t *testing.T) {
 	dir := t.TempDir()
-	db := openTestDatabase(t, filepath.Join(dir, "syncvault.sqlite"))
-	srv := &Server{
-		db:       db,
-		pbClient: pocketbase.NoopClient{},
+	app := createTestApp(t, dir)
+
+	_ = &Server{
+		app:      app,
+		pbClient: pbclient.NoopClient{},
 		limiters: newRateLimiterStore(DefaultRateLimitConfig()),
 	}
-	migrateServer(t, srv)
 
 	keys, _ := generateKeysAndSigner(t)
 	userID := keys.UserID()
 
-	// Try to insert a token with NULL device_id - should fail with new schema
-	tokenHash := hashToken("legacy_token_sv_test123")
-	now := time.Now().Add(12 * time.Hour).Unix()
-	_, err := db.ExecContext(ctx, `INSERT INTO tokens(token_hash, user_id, device_id, expires_at) VALUES(?,?,NULL,?)`, tokenHash, userID, now)
-	if err == nil {
-		t.Fatalf("expected error when inserting NULL device_id, but succeeded")
-	}
-	if !strings.Contains(err.Error(), "NOT NULL") {
-		t.Fatalf("expected NOT NULL constraint error, got: %v", err)
+	tokensCol, err := app.FindCollectionByNameOrId("sync_tokens")
+	if err != nil {
+		t.Fatalf("find tokens collection: %v", err)
 	}
 
-	// Verify that default empty string works
-	tokenHash2 := hashToken("token_with_default")
-	_, err = db.ExecContext(ctx, `INSERT INTO tokens(token_hash, user_id, device_id, expires_at) VALUES(?,?,?,?)`, tokenHash2, userID, "", now)
-	if err != nil {
+	// Verify that empty string device_id works (for backward compatibility)
+	tokenHash := hashToken("token_with_empty_device")
+	now := time.Now().Add(12 * time.Hour).Unix()
+
+	tokenRecord := core.NewRecord(tokensCol)
+	tokenRecord.Set("token_hash", tokenHash)
+	tokenRecord.Set("user_id", userID)
+	tokenRecord.Set("device_id", "")
+	tokenRecord.Set("expires_at", now)
+	if err := app.Save(tokenRecord); err != nil {
 		t.Fatalf("inserting token with empty string device_id should work: %v", err)
 	}
 
 	// Verify we can read it back
-	var deviceID string
-	err = db.QueryRowContext(ctx, `SELECT device_id FROM tokens WHERE token_hash=?`, tokenHash2).Scan(&deviceID)
+	foundToken, err := app.FindFirstRecordByFilter(tokensCol, "token_hash = {:token_hash}",
+		map[string]any{"token_hash": tokenHash})
 	if err != nil {
 		t.Fatalf("query token: %v", err)
 	}
-	if deviceID != "" {
-		t.Fatalf("expected empty string device_id, got %q", deviceID)
+	if foundToken.GetString("device_id") != "" {
+		t.Fatalf("expected empty string device_id, got %q", foundToken.GetString("device_id"))
 	}
 }
 
@@ -988,11 +1258,17 @@ func callMigrateEndpoint(t *testing.T, env *serverTestEnv, newUserID string) {
 
 func verifyDevicesMigrated(t *testing.T, env *serverTestEnv, newUserID string) {
 	t.Helper()
-	var count int
-	if err := env.srv.db.QueryRow(`SELECT COUNT(*) FROM devices WHERE user_id=?`, newUserID).Scan(&count); err != nil {
+	app := env.srv.app
+	devicesCol, err := app.FindCollectionByNameOrId("sync_devices")
+	if err != nil {
+		t.Fatalf("find devices collection: %v", err)
+	}
+	devices, err := app.FindRecordsByFilter(devicesCol, "user_id = {:user_id}", "", 100, 0,
+		map[string]any{"user_id": newUserID})
+	if err != nil {
 		t.Fatalf("query devices: %v", err)
 	}
-	if count == 0 {
+	if len(devices) == 0 {
 		t.Fatalf("expected devices under new user_id")
 	}
 }

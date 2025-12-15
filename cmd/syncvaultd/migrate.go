@@ -10,7 +10,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"time"
+
+	"github.com/pocketbase/pocketbase/core"
 )
 
 type migrateReq struct {
@@ -69,35 +70,64 @@ func parseMigrateRequest(r *http.Request) (migrateReq, error) {
 }
 
 func (s *Server) executeMigration(ctx context.Context, req migrateReq) (int64, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	// Create new user record if it doesn't exist
+	usersCol, err := s.app.FindCollectionByNameOrId("sync_users")
 	if err != nil {
 		return 0, err
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
 
-	now := time.Now().Unix()
-	if _, err := tx.Exec(`INSERT OR IGNORE INTO users(user_id, created_at) VALUES(?, ?)`, req.NewUserID, now); err != nil {
-		return 0, err
+	_, err = s.app.FindFirstRecordByFilter(usersCol, "user_id = {:user_id}",
+		map[string]any{"user_id": req.NewUserID})
+	if err != nil {
+		// User doesn't exist, create it
+		userRecord := core.NewRecord(usersCol)
+		userRecord.Set("user_id", req.NewUserID)
+		if err := s.app.Save(userRecord); err != nil {
+			return 0, err
+		}
 	}
 
-	res, err := tx.Exec(`UPDATE devices SET user_id=? WHERE user_id=?`, req.NewUserID, req.OldUserID)
+	// Update devices to point to new user
+	devicesCol, err := s.app.FindCollectionByNameOrId("sync_devices")
 	if err != nil {
 		return 0, err
 	}
-	migratedDevices, _ := res.RowsAffected()
 
-	if _, err := tx.Exec(`DELETE FROM tokens WHERE user_id=?`, req.OldUserID); err != nil {
+	devices, err := s.app.FindRecordsByFilter(devicesCol, "user_id = {:user_id}", "", 1000, 0,
+		map[string]any{"user_id": req.OldUserID})
+	if err != nil {
 		return 0, err
 	}
 
-	if err := s.pbClient.MigrateUserID(ctx, req.OldUserID, req.NewUserID); err != nil {
-		log.Printf("pocketbase migration warning: %v", err)
+	var migratedDevices int64
+	for _, d := range devices {
+		d.Set("user_id", req.NewUserID)
+		if err := s.app.Save(d); err != nil {
+			log.Printf("migrate device error: %v", err)
+			continue
+		}
+		migratedDevices++
 	}
 
-	if err := tx.Commit(); err != nil {
-		return 0, err
+	// Delete old user's tokens
+	tokensCol, err := s.app.FindCollectionByNameOrId("sync_tokens")
+	if err != nil {
+		return migratedDevices, err
+	}
+
+	tokens, err := s.app.FindRecordsByFilter(tokensCol, "user_id = {:user_id}", "", 1000, 0,
+		map[string]any{"user_id": req.OldUserID})
+	if err == nil {
+		for _, t := range tokens {
+			_ = s.app.Delete(t)
+		}
+	}
+
+	// Call external PocketBase migration if client exists
+	if s.pbClient != nil {
+		if err := s.pbClient.MigrateUserID(ctx, req.OldUserID, req.NewUserID); err != nil {
+			log.Printf("pocketbase migration warning: %v", err)
+		}
 	}
 
 	return migratedDevices, nil

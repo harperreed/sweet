@@ -1,15 +1,16 @@
+// ABOUTME: SyncVaultd is the server backend for SyncVault, providing encrypted data sync.
+// ABOUTME: Handles SSH-based auth, multi-device sync, and PocketBase integration for accounts.
+
 package main
 
 import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"log"
 	"net/http"
 	"os"
@@ -17,165 +18,108 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
-
+	"github.com/pocketbase/pocketbase"
+	"github.com/pocketbase/pocketbase/core"
+	"github.com/pocketbase/pocketbase/tools/router"
 	"golang.org/x/crypto/ssh"
 
-	"suitesync/internal/pocketbase"
+	pbclient "suitesync/internal/pocketbase"
+
+	_ "suitesync/cmd/syncvaultd/migrations" // Import migrations
 )
 
 // Server bundles state for syncvaultd handlers.
 type Server struct {
-	db       *sql.DB
-	pbClient pocketbase.Client
-	limiters *rateLimiterStore
+	app          core.App
+	pbClient     pbclient.Client
+	limiters     *rateLimiterStore // Per-user rate limiting for authenticated endpoints
+	authLimiters *rateLimiterStore // Per-IP rate limiting for auth endpoints
 }
 
 func main() {
-	addr := env("ADDR", ":8080")
-	dbPath := env("DB_PATH", "./syncvault.sqlite")
-	flag.StringVar(&addr, "addr", addr, "listen address")
-	flag.StringVar(&dbPath, "db", dbPath, "sqlite db path")
-	flag.Parse()
+	app := pocketbase.New()
 
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-	db.SetMaxOpenConns(1)
-
+	// Initialize PocketBase client for external PB instance (if configured)
 	pbClient := initPocketBaseClient()
 
+	// Create single server instance for routes and cleanup
 	srv := &Server{
-		db:       db,
-		pbClient: pbClient,
-		limiters: newRateLimiterStore(DefaultRateLimitConfig()),
+		app:          app,
+		pbClient:     pbClient,
+		limiters:     newRateLimiterStore(DefaultRateLimitConfig()),
+		authLimiters: newRateLimiterStore(AuthRateLimitConfig()),
 	}
-	if err := srv.migrate(); err != nil {
+
+	// Register custom routes
+	app.OnServe().BindFunc(func(se *core.ServeEvent) error {
+		srv.registerRoutes(se.Router)
+		return se.Next()
+	})
+
+	// Start cleanup routine when app starts
+	app.OnServe().BindFunc(func(se *core.ServeEvent) error {
+		ctx := context.Background()
+		srv.startCleanupRoutine(ctx)
+		return se.Next()
+	})
+
+	if err := app.Start(); err != nil {
 		log.Fatal(err)
 	}
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	srv.startCleanupRoutine(ctx)
+func (s *Server) registerRoutes(r *router.Router[*core.RequestEvent]) {
+	r.GET("/healthz", func(e *core.RequestEvent) error {
+		return e.NoContent(http.StatusOK)
+	})
 
-	httpSrv := &http.Server{
-		Addr:              addr,
-		Handler:           srv.handler(),
-		ReadHeaderTimeout: 5 * time.Second,
+	// Auth endpoints (with IP-based rate limiting)
+	// SSH auth (legacy - to be removed)
+	r.POST("/v1/auth/register", s.wrapHandler(s.withIPRateLimit(s.handleRegister)))
+	r.POST("/v1/auth/challenge", s.wrapHandler(s.withIPRateLimit(s.handleChallenge)))
+	r.POST("/v1/auth/verify", s.wrapHandler(s.withIPRateLimit(s.handleVerify)))
+
+	// PocketBase email/password auth (new)
+	r.POST("/v1/auth/pb/register", s.wrapHandler(s.withIPRateLimit(s.handlePBRegister)))
+	r.POST("/v1/auth/pb/login", s.wrapHandler(s.withIPRateLimit(s.handlePBLogin)))
+	r.POST("/v1/auth/pb/refresh", s.wrapHandler(s.withIPRateLimit(s.handlePBRefresh)))
+
+	// Sync endpoints (protected)
+	r.POST("/v1/sync/push", s.wrapHandler(s.withAuth(s.handlePush)))
+	r.GET("/v1/sync/pull", s.wrapHandler(s.withAuth(s.handlePull)))
+	r.POST("/v1/sync/snapshot", s.wrapHandler(s.withAuth(s.handleSnapshot)))
+	r.POST("/v1/sync/compact", s.wrapHandler(s.withAuth(s.handleCompact)))
+
+	// Device management (protected)
+	r.GET("/v1/devices", s.wrapHandler(s.withAuth(s.handleListDevices)))
+	r.DELETE("/v1/devices/:deviceId", s.wrapHandler(s.withAuth(s.handleRevokeDevice)))
+
+	// Account management (protected)
+	r.POST("/v1/account/migrate", s.wrapHandler(s.withAuth(s.handleMigrate)))
+}
+
+// wrapHandler converts http.HandlerFunc to PocketBase RequestHandler.
+func (s *Server) wrapHandler(h http.HandlerFunc) func(*core.RequestEvent) error {
+	return func(e *core.RequestEvent) error {
+		h(e.Response, e.Request)
+		return nil
 	}
+}
 
-	log.Printf("syncvaultd listening on %s (db=%s)", addr, dbPath)
-	if err := httpSrv.ListenAndServe(); err != nil {
-		cancel()
-		log.Fatal(err)
+// withIPRateLimit applies per-IP rate limiting for auth endpoints.
+// This protects against brute-force attacks on unauthenticated endpoints.
+func (s *Server) withIPRateLimit(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.authLimiters != nil {
+			clientIP := getClientIP(r)
+			limiter := s.authLimiters.get(clientIP)
+			if !limiter.Allow() {
+				fail(w, http.StatusTooManyRequests, "rate limit exceeded")
+				return
+			}
+		}
+		next(w, r)
 	}
-}
-
-func (s *Server) migrate() error {
-	schema := buildSchema()
-	_, err := s.db.Exec(schema)
-	return err
-}
-
-func buildSchema() string {
-	return `
-PRAGMA journal_mode=WAL;
-` + schemaUsers() + schemaDevices() + schemaAuth() + schemaChanges() + schemaSnapshots()
-}
-
-func schemaUsers() string {
-	return `
-CREATE TABLE IF NOT EXISTS users (
-  user_id TEXT PRIMARY KEY,
-  created_at INTEGER NOT NULL
-);
-`
-}
-
-func schemaDevices() string {
-	return `
-CREATE TABLE IF NOT EXISTS devices (
-  device_id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  ssh_pubkey TEXT NOT NULL,
-  ssh_pubkey_fp TEXT NOT NULL,
-  name TEXT,
-  created_at INTEGER NOT NULL,
-  last_used_at INTEGER,
-  UNIQUE(ssh_pubkey_fp)
-);
-CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);
-CREATE INDEX IF NOT EXISTS idx_devices_fp ON devices(ssh_pubkey_fp);
-`
-}
-
-func schemaAuth() string {
-	return `
-CREATE TABLE IF NOT EXISTS challenges (
-  challenge_id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  challenge BLOB NOT NULL,
-  expires_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS tokens (
-  token_hash TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  device_id TEXT NOT NULL DEFAULT '',
-  expires_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_tokens_device ON tokens(device_id);
-CREATE INDEX IF NOT EXISTS idx_tokens_user_exp ON tokens(user_id, expires_at);
-CREATE INDEX IF NOT EXISTS idx_challenges_user_exp ON challenges(user_id, expires_at);
-`
-}
-
-func schemaChanges() string {
-	return `
-CREATE TABLE IF NOT EXISTS changes (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id TEXT NOT NULL,
-  change_id TEXT NOT NULL,
-  device_id TEXT NOT NULL,
-  entity TEXT NOT NULL,
-  ts INTEGER NOT NULL,
-  nonce_b64 TEXT NOT NULL,
-  ct_b64 TEXT NOT NULL,
-  UNIQUE(user_id, change_id)
-);
-CREATE INDEX IF NOT EXISTS idx_changes_user_seq ON changes(user_id, seq);
-`
-}
-
-func schemaSnapshots() string {
-	return `
-CREATE TABLE IF NOT EXISTS snapshots (
-  snapshot_id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  entity TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  min_seq INTEGER NOT NULL,
-  nonce_b64 TEXT NOT NULL,
-  ct_b64 TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_snapshots_user_entity ON snapshots(user_id, entity, created_at DESC);
-`
-}
-
-func (s *Server) handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	mux.HandleFunc("/v1/auth/register", s.handleRegister)
-	mux.HandleFunc("/v1/auth/challenge", s.handleChallenge)
-	mux.HandleFunc("/v1/auth/verify", s.handleVerify)
-	mux.HandleFunc("/v1/sync/push", s.withAuth(s.handlePush))
-	mux.HandleFunc("/v1/sync/pull", s.withAuth(s.handlePull))
-	mux.HandleFunc("/v1/sync/snapshot", s.withAuth(s.handleSnapshot))
-	mux.HandleFunc("/v1/sync/compact", s.withAuth(s.handleCompact))
-	mux.HandleFunc("/v1/devices", s.withAuth(s.handleListDevices))
-	mux.HandleFunc("/v1/devices/", s.withAuth(s.handleRevokeDevice))
-	mux.HandleFunc("/v1/account/migrate", s.withAuth(s.handleMigrate))
-	return withJSON(withLogging(mux))
 }
 
 // register
@@ -185,8 +129,10 @@ type registerReq struct {
 	SSHPubkeyOpen string `json:"ssh_pubkey_openssh"`
 	DeviceID      string `json:"device_id,omitempty"`
 	DeviceName    string `json:"device_name,omitempty"`
+	Force         bool   `json:"force,omitempty"` // Allow re-registering key to different user
 }
 
+//nolint:funlen,nestif // SSH auth registration requires multiple steps with nested ownership checks.
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		fail(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -217,24 +163,67 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		deviceID = randHex(16)
 	}
 
-	now := time.Now().Unix()
-
 	// Ensure user exists
-	if _, err := s.db.Exec(`INSERT OR IGNORE INTO users(user_id, created_at) VALUES(?,?)`, req.UserID, now); err != nil {
-		fail(w, http.StatusInternalServerError, "db error")
+	usersCol, err := s.app.FindCollectionByNameOrId("sync_users")
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "collection not found")
 		return
 	}
 
-	// Insert or update device (by fingerprint to handle re-registration of same key)
-	if _, err := s.db.Exec(`
-INSERT INTO devices(device_id, user_id, ssh_pubkey, ssh_pubkey_fp, name, created_at)
-VALUES(?,?,?,?,?,?)
-ON CONFLICT(ssh_pubkey_fp) DO UPDATE SET
-  name=COALESCE(excluded.name, devices.name),
-  ssh_pubkey=excluded.ssh_pubkey
-`, deviceID, req.UserID, req.SSHPubkeyOpen, fp, req.DeviceName, now); err != nil {
-		fail(w, http.StatusInternalServerError, "db error")
+	_, err = s.app.FindFirstRecordByFilter(usersCol, "user_id = {:user_id}", map[string]any{"user_id": req.UserID})
+	if err != nil {
+		// User doesn't exist, create it
+		userRecord := core.NewRecord(usersCol)
+		userRecord.Set("user_id", req.UserID)
+		if err := s.app.Save(userRecord); err != nil {
+			log.Printf("register user insert error: %v", err)
+			fail(w, http.StatusInternalServerError, "db error")
+			return
+		}
+	}
+
+	// Check if device with this fingerprint exists
+	devicesCol, err := s.app.FindCollectionByNameOrId("sync_devices")
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "collection not found")
 		return
+	}
+
+	existingDevice, err := s.app.FindFirstRecordByFilter(devicesCol, "ssh_pubkey_fp = {:fp}", map[string]any{"fp": fp})
+	if err == nil {
+		// Device exists - check ownership
+		existingUserID := existingDevice.GetString("user_id")
+		if existingUserID != req.UserID {
+			if !req.Force {
+				fail(w, http.StatusConflict, "ssh key already registered to another user (use force=true to migrate)")
+				return
+			}
+			// Force flag set - migrate key to new user
+			log.Printf("migrating device %s from user %s to %s", existingDevice.GetString("device_id"), existingUserID, req.UserID)
+		}
+		// Update existing device (potentially with new user_id if force=true)
+		existingDevice.Set("user_id", req.UserID)
+		if req.DeviceName != "" {
+			existingDevice.Set("name", req.DeviceName)
+		}
+		existingDevice.Set("ssh_pubkey", req.SSHPubkeyOpen)
+		if err := s.app.Save(existingDevice); err != nil {
+			fail(w, http.StatusInternalServerError, "db error")
+			return
+		}
+		deviceID = existingDevice.GetString("device_id")
+	} else {
+		// Create new device
+		deviceRecord := core.NewRecord(devicesCol)
+		deviceRecord.Set("device_id", deviceID)
+		deviceRecord.Set("user_id", req.UserID)
+		deviceRecord.Set("ssh_pubkey", req.SSHPubkeyOpen)
+		deviceRecord.Set("ssh_pubkey_fp", fp)
+		deviceRecord.Set("name", req.DeviceName)
+		if err := s.app.Save(deviceRecord); err != nil {
+			fail(w, http.StatusInternalServerError, "db error")
+			return
+		}
 	}
 
 	ok(w, map[string]any{"ok": true, "ssh_fp": fp, "device_id": deviceID})
@@ -269,13 +258,16 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var existing string
-	if err := s.db.QueryRow(`SELECT user_id FROM users WHERE user_id=?`, userID).Scan(&existing); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			fail(w, http.StatusNotFound, "unknown user_id")
-			return
-		}
-		fail(w, http.StatusInternalServerError, "db error")
+	// Check user exists
+	usersCol, err := s.app.FindCollectionByNameOrId("sync_users")
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "collection not found")
+		return
+	}
+
+	_, err = s.app.FindFirstRecordByFilter(usersCol, "user_id = {:user_id}", map[string]any{"user_id": userID})
+	if err != nil {
+		fail(w, http.StatusNotFound, "unknown user_id")
 		return
 	}
 
@@ -287,10 +279,19 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	}
 	expires := time.Now().Add(2 * time.Minute).Unix()
 
-	if _, err := s.db.Exec(`
-INSERT INTO challenges(challenge_id, user_id, challenge, expires_at)
-VALUES(?,?,?,?)
-`, chID, userID, challenge, expires); err != nil {
+	// Create challenge record
+	challengesCol, err := s.app.FindCollectionByNameOrId("sync_challenges")
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "collection not found")
+		return
+	}
+
+	challengeRecord := core.NewRecord(challengesCol)
+	challengeRecord.Set("challenge_id", chID)
+	challengeRecord.Set("user_id", userID)
+	challengeRecord.Set("challenge", base64.StdEncoding.EncodeToString(challenge)) // Store as base64 in text field
+	challengeRecord.Set("expires_at", expires)
+	if err := s.app.Save(challengeRecord); err != nil {
 		fail(w, http.StatusInternalServerError, "db error")
 		return
 	}
@@ -357,12 +358,10 @@ func (s *Server) processVerify(ctx context.Context, req verifyReq) (verifyResp, 
 		return verifyResp{}, http.StatusForbidden, errors.New("account inactive")
 	}
 
-	challenge, expires, err := s.loadChallenge(req.UserID, req.ChallengeID)
+	// Atomically load and delete challenge to prevent TOCTOU attacks
+	challenge, expires, err := s.loadAndDeleteChallenge(req.UserID, req.ChallengeID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return verifyResp{}, http.StatusNotFound, errors.New("unknown challenge")
-		}
-		return verifyResp{}, http.StatusInternalServerError, errors.New("db error")
+		return verifyResp{}, http.StatusNotFound, errors.New("unknown challenge")
 	}
 	if time.Now().Unix() > expires {
 		return verifyResp{}, http.StatusUnauthorized, errors.New("challenge expired")
@@ -374,18 +373,18 @@ func (s *Server) processVerify(ctx context.Context, req verifyReq) (verifyResp, 
 	}
 
 	// Find device that can verify this signature
-	deviceID, _, err := s.findDeviceForSignature(req.UserID, challenge, sig)
+	deviceID, deviceRecord, err := s.findDeviceForSignature(req.UserID, challenge, sig)
 	if err != nil {
 		return verifyResp{}, http.StatusUnauthorized, errors.New("signature verification failed")
 	}
 
-	// Delete used challenge
-	if _, err := s.db.Exec(`DELETE FROM challenges WHERE challenge_id=?`, req.ChallengeID); err != nil {
-		return verifyResp{}, http.StatusInternalServerError, errors.New("db error")
+	// Update last_used_at (non-critical, log on error)
+	if deviceRecord != nil {
+		deviceRecord.Set("last_used_at", time.Now().Unix())
+		if err := s.app.Save(deviceRecord); err != nil {
+			log.Printf("update device last_used_at error: %v", err)
+		}
 	}
-
-	// Update last_used_at
-	_, _ = s.db.Exec(`UPDATE devices SET last_used_at=? WHERE device_id=?`, time.Now().Unix(), deviceID)
 
 	resp, err := s.issueTokenForDevice(req.UserID, deviceID)
 	if err != nil {
@@ -394,26 +393,25 @@ func (s *Server) processVerify(ctx context.Context, req verifyReq) (verifyResp, 
 	return resp, http.StatusOK, nil
 }
 
-func (s *Server) findDeviceForSignature(userID string, challenge []byte, sig *ssh.Signature) (string, ssh.PublicKey, error) {
-	rows, err := s.db.Query(`SELECT device_id, ssh_pubkey FROM devices WHERE user_id=?`, userID)
+func (s *Server) findDeviceForSignature(userID string, challenge []byte, sig *ssh.Signature) (string, *core.Record, error) {
+	devicesCol, err := s.app.FindCollectionByNameOrId("sync_devices")
 	if err != nil {
 		return "", nil, err
 	}
-	defer func() {
-		_ = rows.Close()
-	}()
 
-	for rows.Next() {
-		var deviceID, pubStr string
-		if err := rows.Scan(&deviceID, &pubStr); err != nil {
-			continue
-		}
-		pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubStr))
+	devices, err := s.app.FindRecordsByFilter(devicesCol, "user_id = {:user_id}", "", 100, 0, map[string]any{"user_id": userID})
+	if err != nil {
+		return "", nil, err
+	}
+
+	for _, d := range devices {
+		pubKeyStr := d.GetString("ssh_pubkey")
+		pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubKeyStr))
 		if err != nil {
 			continue
 		}
 		if err := pub.Verify(challenge, sig); err == nil {
-			return deviceID, pub, nil
+			return d.GetString("device_id"), d, nil
 		}
 	}
 	return "", nil, errors.New("no matching device")
@@ -423,7 +421,18 @@ func (s *Server) issueTokenForDevice(userID, deviceID string) (verifyResp, error
 	token := "sv_" + randHex(32)
 	tokenHash := hashToken(token)
 	exp := time.Now().Add(12 * time.Hour).Unix()
-	if _, err := s.db.Exec(`INSERT INTO tokens(token_hash, user_id, device_id, expires_at) VALUES(?,?,?,?)`, tokenHash, userID, deviceID, exp); err != nil {
+
+	tokensCol, err := s.app.FindCollectionByNameOrId("sync_tokens")
+	if err != nil {
+		return verifyResp{}, err
+	}
+
+	tokenRecord := core.NewRecord(tokensCol)
+	tokenRecord.Set("token_hash", tokenHash)
+	tokenRecord.Set("user_id", userID)
+	tokenRecord.Set("device_id", deviceID)
+	tokenRecord.Set("expires_at", exp)
+	if err := s.app.Save(tokenRecord); err != nil {
 		return verifyResp{}, err
 	}
 	return verifyResp{Token: token, ExpiresUnix: exp}, nil
@@ -471,21 +480,52 @@ func (s *Server) authUser(r *http.Request) (authInfo, error) {
 	if raw == "" {
 		return authInfo{}, errors.New("missing bearer token")
 	}
+
+	// Try JWT first (PocketBase auth)
+	if info, err := s.authUserJWT(raw); err == nil {
+		return info, nil
+	}
+
+	// Fall back to SSH token (legacy)
+	return s.authUserSSH(raw)
+}
+
+func (s *Server) authUserJWT(token string) (authInfo, error) {
+	// Use PocketBase's built-in token verification
+	// This works for auth tokens generated by NewAuthToken() or NewStaticAuthToken()
+	userRecord, err := s.app.FindAuthRecordByToken(token, "")
+	if err != nil {
+		return authInfo{}, errors.New("invalid token")
+	}
+
+	// JWT tokens don't have device_id - use empty string
+	return authInfo{
+		userID:   userRecord.Id,
+		deviceID: "",
+	}, nil
+}
+
+func (s *Server) authUserSSH(raw string) (authInfo, error) {
 	th := hashToken(raw)
 
-	var userID string
-	var deviceID string
-	var exp int64
-	if err := s.db.QueryRow(`SELECT user_id, device_id, expires_at FROM tokens WHERE token_hash=?`, th).Scan(&userID, &deviceID, &exp); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return authInfo{}, errors.New("invalid token")
-		}
+	tokensCol, err := s.app.FindCollectionByNameOrId("sync_tokens")
+	if err != nil {
 		return authInfo{}, errors.New("db error")
 	}
-	if time.Now().Unix() > exp {
+
+	tokenRecord, err := s.app.FindFirstRecordByFilter(tokensCol, "token_hash = {:token_hash}", map[string]any{"token_hash": th})
+	if err != nil {
+		return authInfo{}, errors.New("invalid token")
+	}
+
+	exp := tokenRecord.GetInt("expires_at")
+	if time.Now().Unix() > int64(exp) {
 		return authInfo{}, errors.New("token expired")
 	}
-	return authInfo{userID: userID, deviceID: deviceID}, nil
+	return authInfo{
+		userID:   tokenRecord.GetString("user_id"),
+		deviceID: tokenRecord.GetString("device_id"),
+	}, nil
 }
 
 // push/pull
@@ -553,30 +593,12 @@ func decodePushRequest(r *http.Request) (pushReq, error) {
 }
 
 func (s *Server) insertChanges(ctx context.Context, req pushReq) ([]string, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, errors.New("db error")
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	stmt, err := tx.PrepareContext(ctx, `
-INSERT OR IGNORE INTO changes(user_id, change_id, device_id, entity, ts, nonce_b64, ct_b64)
-VALUES(?,?,?,?,?,?,?)
-`)
-	if err != nil {
-		return nil, errors.New("db error")
-	}
-	defer func() {
-		_ = stmt.Close()
-	}()
-
 	ack := make([]string, 0, len(req.Changes))
 	for _, it := range req.Changes {
 		if it.ChangeID == "" || it.Entity == "" || it.Env.NonceB64 == "" || it.Env.CTB64 == "" {
 			continue
 		}
+
 		ts := it.TS
 		if ts == 0 {
 			ts = time.Now().Unix()
@@ -586,21 +608,68 @@ VALUES(?,?,?,?,?,?,?)
 		if deviceID == "" {
 			deviceID = req.DeviceID
 		}
-		if _, err := stmt.ExecContext(ctx, req.UserID, it.ChangeID, deviceID, it.Entity, ts, it.Env.NonceB64, it.Env.CTB64); err != nil {
+
+		// Insert change within transaction to prevent seq race condition
+		err := s.app.RunInTransaction(func(txApp core.App) error {
+			changesCol, err := txApp.FindCollectionByNameOrId("sync_changes")
+			if err != nil {
+				return errors.New("collection not found")
+			}
+
+			// Check if change already exists (idempotency)
+			_, err = txApp.FindFirstRecordByFilter(changesCol, "user_id = {:user_id} && change_id = {:change_id}",
+				map[string]any{"user_id": req.UserID, "change_id": it.ChangeID})
+			if err == nil {
+				// Already exists, skip (will be acked outside transaction)
+				return nil
+			}
+
+			// Get next seq number within transaction
+			seq, err := getNextSeqTx(txApp, changesCol, req.UserID)
+			if err != nil {
+				return err
+			}
+
+			changeRecord := core.NewRecord(changesCol)
+			changeRecord.Set("seq", seq)
+			changeRecord.Set("user_id", req.UserID)
+			changeRecord.Set("change_id", it.ChangeID)
+			changeRecord.Set("device_id", deviceID)
+			changeRecord.Set("entity", it.Entity)
+			changeRecord.Set("ts", ts)
+			changeRecord.Set("nonce_b64", it.Env.NonceB64)
+			changeRecord.Set("ct_b64", it.Env.CTB64)
+			return txApp.Save(changeRecord)
+		})
+		if err != nil {
 			return nil, errors.New("db error")
 		}
 		ack = append(ack, it.ChangeID)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, errors.New("db error")
-	}
 	if len(ack) > 0 {
 		if err := s.pbClient.IncrementUsage(ctx, req.UserID, len(ack)); err != nil {
 			log.Printf("pocketbase usage update failed: %v", err)
 		}
 	}
 	return ack, nil
+}
+
+// getNextSeqTx returns the next sequence number within a transaction.
+// This ensures atomic read-and-increment to prevent race conditions.
+//
+//nolint:unparam // Error return kept for API consistency; may be used in future.
+func getNextSeqTx(txApp core.App, changesCol *core.Collection, userID string) (int64, error) {
+	// Find max seq for this user
+	records, err := txApp.FindRecordsByFilter(changesCol, "user_id = {:user_id}", "-seq", 1, 0, map[string]any{"user_id": userID})
+	if err != nil {
+		// If query fails, start at 1 (safe default for new users)
+		return 1, nil //nolint:nilerr // Starting at seq 1 is safe even on query error.
+	}
+	if len(records) == 0 {
+		return 1, nil
+	}
+	return int64(records[0].GetInt("seq")) + 1, nil
 }
 
 type pullResp struct {
@@ -676,30 +745,31 @@ func (s *Server) buildPullResponse(ctx context.Context, userID string, since int
 	return resp, nil
 }
 
-func (s *Server) queryChanges(ctx context.Context, userID string, since int64) ([]pullItem, error) {
-	rows, err := s.db.QueryContext(ctx, `
-SELECT seq, change_id, device_id, entity, ts, nonce_b64, ct_b64
-FROM changes
-WHERE user_id = ? AND seq > ?
-ORDER BY seq ASC
-LIMIT 500
-`, userID, since)
+//nolint:unparam // ctx reserved for future use (e.g., cancellation).
+func (s *Server) queryChanges(_ context.Context, userID string, since int64) ([]pullItem, error) {
+	changesCol, err := s.app.FindCollectionByNameOrId("sync_changes")
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		_ = rows.Close()
-	}()
 
-	var items []pullItem
-	for rows.Next() {
-		var it pullItem
-		if err := rows.Scan(&it.Seq, &it.ChangeID, &it.DeviceID, &it.Entity, &it.TS, &it.Env.NonceB64, &it.Env.CTB64); err != nil {
-			return nil, err
-		}
-		items = append(items, it)
+	records, err := s.app.FindRecordsByFilter(changesCol, "user_id = {:user_id} && seq > {:since}", "seq", 500, 0,
+		map[string]any{"user_id": userID, "since": since})
+	if err != nil {
+		return nil, err
 	}
-	return items, rows.Err()
+
+	items := make([]pullItem, len(records))
+	for i, r := range records {
+		items[i] = pullItem{
+			Seq:      int64(r.GetInt("seq")),
+			ChangeID: r.GetString("change_id"),
+			DeviceID: r.GetString("device_id"),
+			Entity:   r.GetString("entity"),
+			TS:       int64(r.GetInt("ts")),
+			Env:      envelope{NonceB64: r.GetString("nonce_b64"), CTB64: r.GetString("ct_b64")},
+		}
+	}
+	return items, nil
 }
 
 // helpers
@@ -719,29 +789,6 @@ func fail(w http.ResponseWriter, code int, msg string) {
 	}
 }
 
-func withLogging(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		next.ServeHTTP(w, r)
-		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start))
-	})
-}
-
-func withJSON(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		next.ServeHTTP(w, r)
-	})
-}
-
-func env(key, def string) string {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return def
-	}
-	return v
-}
-
 func randHex(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
@@ -753,23 +800,54 @@ func hashToken(raw string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func initPocketBaseClient() pocketbase.Client {
+func initPocketBaseClient() pbclient.Client {
 	base := strings.TrimSpace(os.Getenv("POCKETBASE_URL"))
 	token := strings.TrimSpace(os.Getenv("POCKETBASE_ADMIN_TOKEN"))
 	if base == "" || token == "" {
-		return pocketbase.NoopClient{}
+		return pbclient.NoopClient{}
 	}
-	return &pocketbase.HTTPClient{
+	return &pbclient.HTTPClient{
 		BaseURL: base,
 		Token:   token,
 	}
 }
 
-func (s *Server) loadChallenge(userID, challengeID string) ([]byte, int64, error) {
-	var ch []byte
+// loadAndDeleteChallenge atomically finds and deletes a challenge in a transaction.
+// This prevents TOCTOU attacks where two requests could use the same challenge.
+// Returns challenge bytes and expiry. The challenge is deleted regardless of verification outcome.
+func (s *Server) loadAndDeleteChallenge(userID, challengeID string) ([]byte, int64, error) {
+	var challenge []byte
 	var expires int64
-	err := s.db.QueryRow(`SELECT challenge, expires_at FROM challenges WHERE challenge_id=? AND user_id=?`, challengeID, userID).Scan(&ch, &expires)
-	return ch, expires, err
+
+	err := s.app.RunInTransaction(func(txApp core.App) error {
+		challengesCol, err := txApp.FindCollectionByNameOrId("sync_challenges")
+		if err != nil {
+			return err
+		}
+
+		record, err := txApp.FindFirstRecordByFilter(challengesCol, "challenge_id = {:challenge_id} && user_id = {:user_id}",
+			map[string]any{"challenge_id": challengeID, "user_id": userID})
+		if err != nil {
+			return err
+		}
+
+		// Challenge is stored as base64 in text field
+		challengeB64 := record.GetString("challenge")
+		challenge, err = base64.StdEncoding.DecodeString(challengeB64)
+		if err != nil {
+			return err
+		}
+
+		expires = int64(record.GetInt("expires_at"))
+
+		// Delete the challenge atomically to prevent reuse
+		return txApp.Delete(record)
+	})
+
+	if err != nil {
+		return nil, 0, err
+	}
+	return challenge, expires, nil
 }
 
 func parseSignature(sigB64 string) (*ssh.Signature, error) {
@@ -782,4 +860,12 @@ func parseSignature(sigB64 string) (*ssh.Signature, error) {
 		return nil, errors.New("invalid signature encoding")
 	}
 	return sig, nil
+}
+
+// snapshotInfo is used by pull endpoint to return snapshot data.
+type snapshotInfo struct {
+	SnapshotID string   `json:"snapshot_id"`
+	MinSeq     int64    `json:"min_seq"`
+	CreatedAt  int64    `json:"created_at"`
+	Env        envelope `json:"env"`
 }

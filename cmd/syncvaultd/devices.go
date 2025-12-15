@@ -4,6 +4,7 @@
 package main
 
 import (
+	"log"
 	"net/http"
 	"strings"
 )
@@ -23,38 +24,38 @@ func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := r.Context().Value(ctxUserIDKey{}).(string)
 
-	rows, err := s.db.QueryContext(r.Context(), `
-SELECT device_id, name, created_at, last_used_at, ssh_pubkey_fp
-FROM devices WHERE user_id = ?
-ORDER BY created_at DESC
-`, userID)
+	devicesCol, err := s.app.FindCollectionByNameOrId("sync_devices")
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "collection not found")
+		return
+	}
+
+	records, err := s.app.FindRecordsByFilter(devicesCol, "user_id = {:user_id}", "", 100, 0,
+		map[string]any{"user_id": userID})
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	defer func() {
-		_ = rows.Close()
-	}()
 
-	devices := []deviceInfo{}
-	for rows.Next() {
-		var d deviceInfo
-		var name *string
-		var lastUsed *int64
-		if err := rows.Scan(&d.DeviceID, &name, &d.CreatedAt, &lastUsed, &d.Fingerprint); err != nil {
-			fail(w, http.StatusInternalServerError, "db error")
-			return
+	devices := make([]deviceInfo, 0, len(records))
+	for _, r := range records {
+		d := deviceInfo{
+			DeviceID:    r.GetString("device_id"),
+			Name:        r.GetString("name"),
+			CreatedAt:   r.GetDateTime("created").Time().Unix(),
+			Fingerprint: r.GetString("ssh_pubkey_fp"),
 		}
-		if name != nil {
-			d.Name = *name
+		if lastUsed := r.GetInt("last_used_at"); lastUsed > 0 {
+			lu := int64(lastUsed)
+			d.LastUsedAt = &lu
 		}
-		d.LastUsedAt = lastUsed
 		devices = append(devices, d)
 	}
 
 	ok(w, map[string]any{"devices": devices})
 }
 
+//nolint:funlen // Device revocation requires multiple validation steps.
 func (s *Server) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		fail(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -78,36 +79,47 @@ func (s *Server) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify device belongs to user
-	var owner string
-	err := s.db.QueryRowContext(r.Context(), `SELECT user_id FROM devices WHERE device_id=?`, deviceID).Scan(&owner)
+	devicesCol, err := s.app.FindCollectionByNameOrId("sync_devices")
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "collection not found")
+		return
+	}
+
+	deviceRecord, err := s.app.FindFirstRecordByFilter(devicesCol, "device_id = {:device_id}",
+		map[string]any{"device_id": deviceID})
 	if err != nil {
 		fail(w, http.StatusNotFound, "device not found")
 		return
 	}
-	if owner != userID {
+	if deviceRecord.GetString("user_id") != userID {
 		fail(w, http.StatusForbidden, "not your device")
 		return
 	}
 
-	// Delete device and its tokens
-	tx, err := s.db.BeginTx(r.Context(), nil)
+	// Delete device's tokens first
+	tokensCol, err := s.app.FindCollectionByNameOrId("sync_tokens")
 	if err != nil {
+		log.Printf("find tokens collection error: %v", err)
 		fail(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	tokens, err := s.app.FindRecordsByFilter(tokensCol, "device_id = {:device_id}", "", 1000, 0,
+		map[string]any{"device_id": deviceID})
+	if err != nil {
+		log.Printf("query tokens error: %v", err)
+		fail(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	for _, t := range tokens {
+		if err := s.app.Delete(t); err != nil {
+			log.Printf("delete token error: %v", err)
+			fail(w, http.StatusInternalServerError, "failed to revoke token")
+			return
+		}
+	}
 
-	if _, err := tx.Exec(`DELETE FROM tokens WHERE device_id=?`, deviceID); err != nil {
-		fail(w, http.StatusInternalServerError, "db error")
-		return
-	}
-	if _, err := tx.Exec(`DELETE FROM devices WHERE device_id=?`, deviceID); err != nil {
-		fail(w, http.StatusInternalServerError, "db error")
-		return
-	}
-	if err := tx.Commit(); err != nil {
+	// Delete device
+	if err := s.app.Delete(deviceRecord); err != nil {
 		fail(w, http.StatusInternalServerError, "db error")
 		return
 	}
