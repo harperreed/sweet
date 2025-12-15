@@ -25,6 +25,7 @@ type Options struct {
 	DeviceID   string
 	ServerURL  string
 	AuthToken  string
+	UserID     string // Server-side user identifier (PocketBase record ID)
 }
 
 // App glues an entity-specific CLI to the vault library.
@@ -118,7 +119,10 @@ func (a *App) Sync(ctx context.Context) error {
 	if a.opts.ServerURL == "" || a.opts.AuthToken == "" {
 		return errors.New("server url and auth token required for sync")
 	}
-	return vault.Sync(ctx, a.store, a.client, a.keys, a.ApplyChange)
+	if a.opts.UserID == "" {
+		return errors.New("user id required for sync")
+	}
+	return vault.Sync(ctx, a.store, a.client, a.keys, a.opts.UserID, a.ApplyChange)
 }
 
 // ApplyChange is passed to vault.Sync to mutate local records.

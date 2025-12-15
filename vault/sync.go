@@ -10,9 +10,9 @@ import (
 type ApplyFn func(ctx context.Context, c Change) error
 
 // Sync flushes local outbox then pulls remote updates.
-func Sync(ctx context.Context, store *Store, client *Client, keys Keys, apply ApplyFn) error {
-	userID := keys.UserID()
-
+// userID is the server-side user identifier (PocketBase record ID).
+// keys is used only for encryption/decryption, not for user identification.
+func Sync(ctx context.Context, store *Store, client *Client, keys Keys, userID string, apply ApplyFn) error {
 	if err := pushOutbox(ctx, store, client, userID); err != nil {
 		return err
 	}

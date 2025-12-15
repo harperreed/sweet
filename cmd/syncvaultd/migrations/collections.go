@@ -36,14 +36,6 @@ func init() {
 				Required: true,
 			},
 			&core.TextField{
-				Name:     "ssh_pubkey",
-				Required: true,
-			},
-			&core.TextField{
-				Name:     "ssh_pubkey_fp",
-				Required: true,
-			},
-			&core.TextField{
 				Name: "name",
 			},
 			&core.NumberField{
@@ -51,61 +43,8 @@ func init() {
 			},
 		)
 		syncDevices.AddIndex("idx_sync_devices_device_id", true, "device_id", "")
-		syncDevices.AddIndex("idx_sync_devices_ssh_pubkey_fp", true, "ssh_pubkey_fp", "")
 		syncDevices.AddIndex("idx_sync_devices_user_id", false, "user_id", "")
 		if err := app.Save(syncDevices); err != nil {
-			return err
-		}
-
-		// sync_challenges collection
-		syncChallenges := core.NewBaseCollection("sync_challenges")
-		syncChallenges.Fields.Add(
-			&core.TextField{
-				Name:     "challenge_id",
-				Required: true,
-			},
-			&core.TextField{
-				Name:     "user_id",
-				Required: true,
-			},
-			&core.TextField{
-				Name:     "challenge",
-				Required: true,
-			},
-			&core.NumberField{
-				Name:     "expires_at",
-				Required: true,
-			},
-		)
-		syncChallenges.AddIndex("idx_sync_challenges_challenge_id", true, "challenge_id", "")
-		syncChallenges.AddIndex("idx_sync_challenges_user_exp", false, "user_id, expires_at", "")
-		if err := app.Save(syncChallenges); err != nil {
-			return err
-		}
-
-		// sync_tokens collection
-		syncTokens := core.NewBaseCollection("sync_tokens")
-		syncTokens.Fields.Add(
-			&core.TextField{
-				Name:     "token_hash",
-				Required: true,
-			},
-			&core.TextField{
-				Name:     "user_id",
-				Required: true,
-			},
-			&core.TextField{
-				Name: "device_id",
-			},
-			&core.NumberField{
-				Name:     "expires_at",
-				Required: true,
-			},
-		)
-		syncTokens.AddIndex("idx_sync_tokens_token_hash", true, "token_hash", "")
-		syncTokens.AddIndex("idx_sync_tokens_device", false, "device_id", "")
-		syncTokens.AddIndex("idx_sync_tokens_user_exp", false, "user_id, expires_at", "")
-		if err := app.Save(syncTokens); err != nil {
 			return err
 		}
 
@@ -191,8 +130,6 @@ func init() {
 		collections := []string{
 			"sync_snapshots",
 			"sync_changes",
-			"sync_tokens",
-			"sync_challenges",
 			"sync_devices",
 			"sync_users",
 		}

@@ -109,19 +109,7 @@ func (s *Server) executeMigration(ctx context.Context, req migrateReq) (int64, e
 		migratedDevices++
 	}
 
-	// Delete old user's tokens
-	tokensCol, err := s.app.FindCollectionByNameOrId("sync_tokens")
-	if err != nil {
-		return migratedDevices, err
-	}
-
-	tokens, err := s.app.FindRecordsByFilter(tokensCol, "user_id = {:user_id}", "", 1000, 0,
-		map[string]any{"user_id": req.OldUserID})
-	if err == nil {
-		for _, t := range tokens {
-			_ = s.app.Delete(t)
-		}
-	}
+	// sync_tokens collection removed - JWT auth uses PocketBase tokens now
 
 	// Call external PocketBase migration if client exists
 	if s.pbClient != nil {

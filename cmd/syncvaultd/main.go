@@ -1,13 +1,11 @@
 // ABOUTME: SyncVaultd is the server backend for SyncVault, providing encrypted data sync.
-// ABOUTME: Handles SSH-based auth, multi-device sync, and PocketBase integration for accounts.
+// ABOUTME: Handles PocketBase JWT auth, multi-device sync, and account management.
 
 package main
 
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,7 +19,6 @@ import (
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/router"
-	"golang.org/x/crypto/ssh"
 
 	pbclient "suitesync/internal/pocketbase"
 
@@ -56,13 +53,6 @@ func main() {
 		return se.Next()
 	})
 
-	// Start cleanup routine when app starts
-	app.OnServe().BindFunc(func(se *core.ServeEvent) error {
-		ctx := context.Background()
-		srv.startCleanupRoutine(ctx)
-		return se.Next()
-	})
-
 	if err := app.Start(); err != nil {
 		log.Fatal(err)
 	}
@@ -74,12 +64,6 @@ func (s *Server) registerRoutes(r *router.Router[*core.RequestEvent]) {
 	})
 
 	// Auth endpoints (with IP-based rate limiting)
-	// SSH auth (legacy - to be removed)
-	r.POST("/v1/auth/register", s.wrapHandler(s.withIPRateLimit(s.handleRegister)))
-	r.POST("/v1/auth/challenge", s.wrapHandler(s.withIPRateLimit(s.handleChallenge)))
-	r.POST("/v1/auth/verify", s.wrapHandler(s.withIPRateLimit(s.handleVerify)))
-
-	// PocketBase email/password auth (new)
 	r.POST("/v1/auth/pb/register", s.wrapHandler(s.withIPRateLimit(s.handlePBRegister)))
 	r.POST("/v1/auth/pb/login", s.wrapHandler(s.withIPRateLimit(s.handlePBLogin)))
 	r.POST("/v1/auth/pb/refresh", s.wrapHandler(s.withIPRateLimit(s.handlePBRefresh)))
@@ -120,322 +104,6 @@ func (s *Server) withIPRateLimit(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
-}
-
-// register
-
-type registerReq struct {
-	UserID        string `json:"user_id"`
-	SSHPubkeyOpen string `json:"ssh_pubkey_openssh"`
-	DeviceID      string `json:"device_id,omitempty"`
-	DeviceName    string `json:"device_name,omitempty"`
-	Force         bool   `json:"force,omitempty"` // Allow re-registering key to different user
-}
-
-//nolint:funlen,nestif // SSH auth registration requires multiple steps with nested ownership checks.
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		fail(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	var req registerReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, "invalid json")
-		return
-	}
-	req.UserID = strings.TrimSpace(req.UserID)
-	req.SSHPubkeyOpen = strings.TrimSpace(req.SSHPubkeyOpen)
-	if req.UserID == "" || req.SSHPubkeyOpen == "" {
-		fail(w, http.StatusBadRequest, "user_id and ssh_pubkey_openssh required")
-		return
-	}
-
-	pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(req.SSHPubkeyOpen))
-	if err != nil {
-		fail(w, http.StatusBadRequest, "invalid ssh public key")
-		return
-	}
-	fp := ssh.FingerprintSHA256(pub)
-
-	// Generate device_id if not provided
-	deviceID := req.DeviceID
-	if deviceID == "" {
-		deviceID = randHex(16)
-	}
-
-	// Ensure user exists
-	usersCol, err := s.app.FindCollectionByNameOrId("sync_users")
-	if err != nil {
-		fail(w, http.StatusInternalServerError, "collection not found")
-		return
-	}
-
-	_, err = s.app.FindFirstRecordByFilter(usersCol, "user_id = {:user_id}", map[string]any{"user_id": req.UserID})
-	if err != nil {
-		// User doesn't exist, create it
-		userRecord := core.NewRecord(usersCol)
-		userRecord.Set("user_id", req.UserID)
-		if err := s.app.Save(userRecord); err != nil {
-			log.Printf("register user insert error: %v", err)
-			fail(w, http.StatusInternalServerError, "db error")
-			return
-		}
-	}
-
-	// Check if device with this fingerprint exists
-	devicesCol, err := s.app.FindCollectionByNameOrId("sync_devices")
-	if err != nil {
-		fail(w, http.StatusInternalServerError, "collection not found")
-		return
-	}
-
-	existingDevice, err := s.app.FindFirstRecordByFilter(devicesCol, "ssh_pubkey_fp = {:fp}", map[string]any{"fp": fp})
-	if err == nil {
-		// Device exists - check ownership
-		existingUserID := existingDevice.GetString("user_id")
-		if existingUserID != req.UserID {
-			if !req.Force {
-				fail(w, http.StatusConflict, "ssh key already registered to another user (use force=true to migrate)")
-				return
-			}
-			// Force flag set - migrate key to new user
-			log.Printf("migrating device %s from user %s to %s", existingDevice.GetString("device_id"), existingUserID, req.UserID)
-		}
-		// Update existing device (potentially with new user_id if force=true)
-		existingDevice.Set("user_id", req.UserID)
-		if req.DeviceName != "" {
-			existingDevice.Set("name", req.DeviceName)
-		}
-		existingDevice.Set("ssh_pubkey", req.SSHPubkeyOpen)
-		if err := s.app.Save(existingDevice); err != nil {
-			fail(w, http.StatusInternalServerError, "db error")
-			return
-		}
-		deviceID = existingDevice.GetString("device_id")
-	} else {
-		// Create new device
-		deviceRecord := core.NewRecord(devicesCol)
-		deviceRecord.Set("device_id", deviceID)
-		deviceRecord.Set("user_id", req.UserID)
-		deviceRecord.Set("ssh_pubkey", req.SSHPubkeyOpen)
-		deviceRecord.Set("ssh_pubkey_fp", fp)
-		deviceRecord.Set("name", req.DeviceName)
-		if err := s.app.Save(deviceRecord); err != nil {
-			fail(w, http.StatusInternalServerError, "db error")
-			return
-		}
-	}
-
-	ok(w, map[string]any{"ok": true, "ssh_fp": fp, "device_id": deviceID})
-}
-
-// challenge
-
-type challengeReq struct {
-	UserID string `json:"user_id"`
-}
-
-type challengeResp struct {
-	ChallengeID   string `json:"challenge_id"`
-	ChallengeB64  string `json:"challenge_b64"`
-	ExpiresUnix   int64  `json:"expires_unix"`
-	SigningString string `json:"signing_hint,omitempty"`
-}
-
-func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		fail(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	var req challengeReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, "invalid json")
-		return
-	}
-	userID := strings.TrimSpace(req.UserID)
-	if userID == "" {
-		fail(w, http.StatusBadRequest, "user_id required")
-		return
-	}
-
-	// Check user exists
-	usersCol, err := s.app.FindCollectionByNameOrId("sync_users")
-	if err != nil {
-		fail(w, http.StatusInternalServerError, "collection not found")
-		return
-	}
-
-	_, err = s.app.FindFirstRecordByFilter(usersCol, "user_id = {:user_id}", map[string]any{"user_id": userID})
-	if err != nil {
-		fail(w, http.StatusNotFound, "unknown user_id")
-		return
-	}
-
-	chID := randHex(16)
-	challenge := make([]byte, 32)
-	if _, err := rand.Read(challenge); err != nil {
-		fail(w, http.StatusInternalServerError, "rng error")
-		return
-	}
-	expires := time.Now().Add(2 * time.Minute).Unix()
-
-	// Create challenge record
-	challengesCol, err := s.app.FindCollectionByNameOrId("sync_challenges")
-	if err != nil {
-		fail(w, http.StatusInternalServerError, "collection not found")
-		return
-	}
-
-	challengeRecord := core.NewRecord(challengesCol)
-	challengeRecord.Set("challenge_id", chID)
-	challengeRecord.Set("user_id", userID)
-	challengeRecord.Set("challenge", base64.StdEncoding.EncodeToString(challenge)) // Store as base64 in text field
-	challengeRecord.Set("expires_at", expires)
-	if err := s.app.Save(challengeRecord); err != nil {
-		fail(w, http.StatusInternalServerError, "db error")
-		return
-	}
-
-	ok(w, challengeResp{
-		ChallengeID:   chID,
-		ChallengeB64:  base64.StdEncoding.EncodeToString(challenge),
-		ExpiresUnix:   expires,
-		SigningString: "Sign the base64-decoded challenge bytes with your SSH private key.",
-	})
-}
-
-// verify -> token
-
-type verifyReq struct {
-	UserID       string `json:"user_id"`
-	ChallengeID  string `json:"challenge_id"`
-	SignatureB64 string `json:"signature_b64"`
-}
-
-type verifyResp struct {
-	Token       string `json:"token"`
-	ExpiresUnix int64  `json:"expires_unix"`
-}
-
-func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		fail(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	req, err := decodeVerifyRequest(r)
-	if err != nil {
-		fail(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	resp, status, err := s.processVerify(r.Context(), req)
-	if err != nil {
-		fail(w, status, err.Error())
-		return
-	}
-	ok(w, resp)
-}
-
-func decodeVerifyRequest(r *http.Request) (verifyReq, error) {
-	var req verifyReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		return verifyReq{}, errors.New("invalid json")
-	}
-	req.UserID = strings.TrimSpace(req.UserID)
-	req.ChallengeID = strings.TrimSpace(req.ChallengeID)
-	req.SignatureB64 = strings.TrimSpace(req.SignatureB64)
-	if req.UserID == "" || req.ChallengeID == "" || req.SignatureB64 == "" {
-		return verifyReq{}, errors.New("user_id, challenge_id, signature_b64 required")
-	}
-	return req, nil
-}
-
-func (s *Server) processVerify(ctx context.Context, req verifyReq) (verifyResp, int, error) {
-	account, err := s.pbClient.GetAccountByUserID(ctx, req.UserID)
-	if err != nil {
-		return verifyResp{}, http.StatusUnauthorized, err
-	}
-	if !account.Active {
-		return verifyResp{}, http.StatusForbidden, errors.New("account inactive")
-	}
-
-	// Atomically load and delete challenge to prevent TOCTOU attacks
-	challenge, expires, err := s.loadAndDeleteChallenge(req.UserID, req.ChallengeID)
-	if err != nil {
-		return verifyResp{}, http.StatusNotFound, errors.New("unknown challenge")
-	}
-	if time.Now().Unix() > expires {
-		return verifyResp{}, http.StatusUnauthorized, errors.New("challenge expired")
-	}
-
-	sig, err := parseSignature(req.SignatureB64)
-	if err != nil {
-		return verifyResp{}, http.StatusBadRequest, err
-	}
-
-	// Find device that can verify this signature
-	deviceID, deviceRecord, err := s.findDeviceForSignature(req.UserID, challenge, sig)
-	if err != nil {
-		return verifyResp{}, http.StatusUnauthorized, errors.New("signature verification failed")
-	}
-
-	// Update last_used_at (non-critical, log on error)
-	if deviceRecord != nil {
-		deviceRecord.Set("last_used_at", time.Now().Unix())
-		if err := s.app.Save(deviceRecord); err != nil {
-			log.Printf("update device last_used_at error: %v", err)
-		}
-	}
-
-	resp, err := s.issueTokenForDevice(req.UserID, deviceID)
-	if err != nil {
-		return verifyResp{}, http.StatusInternalServerError, errors.New("db error")
-	}
-	return resp, http.StatusOK, nil
-}
-
-func (s *Server) findDeviceForSignature(userID string, challenge []byte, sig *ssh.Signature) (string, *core.Record, error) {
-	devicesCol, err := s.app.FindCollectionByNameOrId("sync_devices")
-	if err != nil {
-		return "", nil, err
-	}
-
-	devices, err := s.app.FindRecordsByFilter(devicesCol, "user_id = {:user_id}", "", 100, 0, map[string]any{"user_id": userID})
-	if err != nil {
-		return "", nil, err
-	}
-
-	for _, d := range devices {
-		pubKeyStr := d.GetString("ssh_pubkey")
-		pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubKeyStr))
-		if err != nil {
-			continue
-		}
-		if err := pub.Verify(challenge, sig); err == nil {
-			return d.GetString("device_id"), d, nil
-		}
-	}
-	return "", nil, errors.New("no matching device")
-}
-
-func (s *Server) issueTokenForDevice(userID, deviceID string) (verifyResp, error) {
-	token := "sv_" + randHex(32)
-	tokenHash := hashToken(token)
-	exp := time.Now().Add(12 * time.Hour).Unix()
-
-	tokensCol, err := s.app.FindCollectionByNameOrId("sync_tokens")
-	if err != nil {
-		return verifyResp{}, err
-	}
-
-	tokenRecord := core.NewRecord(tokensCol)
-	tokenRecord.Set("token_hash", tokenHash)
-	tokenRecord.Set("user_id", userID)
-	tokenRecord.Set("device_id", deviceID)
-	tokenRecord.Set("expires_at", exp)
-	if err := s.app.Save(tokenRecord); err != nil {
-		return verifyResp{}, err
-	}
-	return verifyResp{Token: token, ExpiresUnix: exp}, nil
 }
 
 // auth middleware
@@ -481,19 +149,14 @@ func (s *Server) authUser(r *http.Request) (authInfo, error) {
 		return authInfo{}, errors.New("missing bearer token")
 	}
 
-	// Try JWT first (PocketBase auth)
-	if info, err := s.authUserJWT(raw); err == nil {
-		return info, nil
-	}
-
-	// Fall back to SSH token (legacy)
-	return s.authUserSSH(raw)
+	// Use JWT auth (PocketBase)
+	return s.authUserJWT(raw)
 }
 
 func (s *Server) authUserJWT(token string) (authInfo, error) {
 	// Use PocketBase's built-in token verification
 	// This works for auth tokens generated by NewAuthToken() or NewStaticAuthToken()
-	userRecord, err := s.app.FindAuthRecordByToken(token, "")
+	userRecord, err := s.app.FindAuthRecordByToken(token, core.TokenTypeAuth)
 	if err != nil {
 		return authInfo{}, errors.New("invalid token")
 	}
@@ -502,29 +165,6 @@ func (s *Server) authUserJWT(token string) (authInfo, error) {
 	return authInfo{
 		userID:   userRecord.Id,
 		deviceID: "",
-	}, nil
-}
-
-func (s *Server) authUserSSH(raw string) (authInfo, error) {
-	th := hashToken(raw)
-
-	tokensCol, err := s.app.FindCollectionByNameOrId("sync_tokens")
-	if err != nil {
-		return authInfo{}, errors.New("db error")
-	}
-
-	tokenRecord, err := s.app.FindFirstRecordByFilter(tokensCol, "token_hash = {:token_hash}", map[string]any{"token_hash": th})
-	if err != nil {
-		return authInfo{}, errors.New("invalid token")
-	}
-
-	exp := tokenRecord.GetInt("expires_at")
-	if time.Now().Unix() > int64(exp) {
-		return authInfo{}, errors.New("token expired")
-	}
-	return authInfo{
-		userID:   tokenRecord.GetString("user_id"),
-		deviceID: tokenRecord.GetString("device_id"),
 	}, nil
 }
 
@@ -789,17 +429,6 @@ func fail(w http.ResponseWriter, code int, msg string) {
 	}
 }
 
-func randHex(n int) string {
-	b := make([]byte, n)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-func hashToken(raw string) string {
-	sum := sha256.Sum256([]byte(raw))
-	return hex.EncodeToString(sum[:])
-}
-
 func initPocketBaseClient() pbclient.Client {
 	base := strings.TrimSpace(os.Getenv("POCKETBASE_URL"))
 	token := strings.TrimSpace(os.Getenv("POCKETBASE_ADMIN_TOKEN"))
@@ -812,54 +441,10 @@ func initPocketBaseClient() pbclient.Client {
 	}
 }
 
-// loadAndDeleteChallenge atomically finds and deletes a challenge in a transaction.
-// This prevents TOCTOU attacks where two requests could use the same challenge.
-// Returns challenge bytes and expiry. The challenge is deleted regardless of verification outcome.
-func (s *Server) loadAndDeleteChallenge(userID, challengeID string) ([]byte, int64, error) {
-	var challenge []byte
-	var expires int64
-
-	err := s.app.RunInTransaction(func(txApp core.App) error {
-		challengesCol, err := txApp.FindCollectionByNameOrId("sync_challenges")
-		if err != nil {
-			return err
-		}
-
-		record, err := txApp.FindFirstRecordByFilter(challengesCol, "challenge_id = {:challenge_id} && user_id = {:user_id}",
-			map[string]any{"challenge_id": challengeID, "user_id": userID})
-		if err != nil {
-			return err
-		}
-
-		// Challenge is stored as base64 in text field
-		challengeB64 := record.GetString("challenge")
-		challenge, err = base64.StdEncoding.DecodeString(challengeB64)
-		if err != nil {
-			return err
-		}
-
-		expires = int64(record.GetInt("expires_at"))
-
-		// Delete the challenge atomically to prevent reuse
-		return txApp.Delete(record)
-	})
-
-	if err != nil {
-		return nil, 0, err
-	}
-	return challenge, expires, nil
-}
-
-func parseSignature(sigB64 string) (*ssh.Signature, error) {
-	sigBytes, err := base64.StdEncoding.DecodeString(sigB64)
-	if err != nil {
-		return nil, errors.New("invalid signature_b64")
-	}
-	sig := &ssh.Signature{}
-	if err := ssh.Unmarshal(sigBytes, sig); err != nil {
-		return nil, errors.New("invalid signature encoding")
-	}
-	return sig, nil
+func randHex(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // snapshotInfo is used by pull endpoint to return snapshot data.

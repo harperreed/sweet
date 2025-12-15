@@ -4,17 +4,15 @@
 package main
 
 import (
-	"log"
 	"net/http"
 	"strings"
 )
 
 type deviceInfo struct {
-	DeviceID    string `json:"device_id"`
-	Name        string `json:"name,omitempty"`
-	CreatedAt   int64  `json:"created_at"`
-	LastUsedAt  *int64 `json:"last_used_at,omitempty"`
-	Fingerprint string `json:"fingerprint"`
+	DeviceID   string `json:"device_id"`
+	Name       string `json:"name,omitempty"`
+	CreatedAt  int64  `json:"created_at"`
+	LastUsedAt *int64 `json:"last_used_at,omitempty"`
 }
 
 func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
@@ -40,10 +38,9 @@ func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
 	devices := make([]deviceInfo, 0, len(records))
 	for _, r := range records {
 		d := deviceInfo{
-			DeviceID:    r.GetString("device_id"),
-			Name:        r.GetString("name"),
-			CreatedAt:   r.GetDateTime("created").Time().Unix(),
-			Fingerprint: r.GetString("ssh_pubkey_fp"),
+			DeviceID:  r.GetString("device_id"),
+			Name:      r.GetString("name"),
+			CreatedAt: r.GetDateTime("created").Time().Unix(),
 		}
 		if lastUsed := r.GetInt("last_used_at"); lastUsed > 0 {
 			lu := int64(lastUsed)
@@ -96,29 +93,7 @@ func (s *Server) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete device's tokens first
-	tokensCol, err := s.app.FindCollectionByNameOrId("sync_tokens")
-	if err != nil {
-		log.Printf("find tokens collection error: %v", err)
-		fail(w, http.StatusInternalServerError, "db error")
-		return
-	}
-	tokens, err := s.app.FindRecordsByFilter(tokensCol, "device_id = {:device_id}", "", 1000, 0,
-		map[string]any{"device_id": deviceID})
-	if err != nil {
-		log.Printf("query tokens error: %v", err)
-		fail(w, http.StatusInternalServerError, "db error")
-		return
-	}
-	for _, t := range tokens {
-		if err := s.app.Delete(t); err != nil {
-			log.Printf("delete token error: %v", err)
-			fail(w, http.StatusInternalServerError, "failed to revoke token")
-			return
-		}
-	}
-
-	// Delete device
+	// Delete device (JWT tokens are managed by PocketBase, no need to delete)
 	if err := s.app.Delete(deviceRecord); err != nil {
 		fail(w, http.StatusInternalServerError, "db error")
 		return

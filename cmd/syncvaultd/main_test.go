@@ -3,22 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
-
-	"golang.org/x/crypto/ssh"
 
 	pbclient "suitesync/internal/pocketbase"
 	"suitesync/vault"
@@ -55,11 +49,14 @@ func newServerTestEnvWithPB(t *testing.T, pb pbclient.Client) *serverTestEnv {
 		limiters: newRateLimiterStore(DefaultRateLimitConfig()),
 	}
 	ts := startTestServer(t, srv)
-	keys, signer := generateKeysAndSigner(t)
+	keys := generateTestKeys(t)
+
+	// Create user and get both token and PB record ID (which is our userID for auth)
+	token, userID := createTestUserAndTokenWithID(t, app, "device-test")
+
 	if init, ok := pb.(pocketbaseAccountInitializer); ok {
-		init.ensureAccount(keys.UserID())
+		init.ensureAccount(userID)
 	}
-	token := loginForToken(t, ts.URL, ctx, keys, signer)
 
 	return &serverTestEnv{
 		t:      t,
@@ -68,7 +65,7 @@ func newServerTestEnvWithPB(t *testing.T, pb pbclient.Client) *serverTestEnv {
 		server: ts,
 		srv:    srv,
 		keys:   keys,
-		userID: keys.UserID(),
+		userID: userID,
 		token:  token,
 	}
 }
@@ -102,6 +99,15 @@ func runTestMigrations(app core.App) error {
 		return nil
 	}
 
+	// Ensure users auth collection exists (required for PocketBase JWT auth)
+	// tests.NewTestApp() creates this by default, but we check anyway
+	if _, err := app.FindCollectionByNameOrId("users"); err != nil {
+		users := core.NewAuthCollection("users")
+		if err := app.Save(users); err != nil {
+			return err
+		}
+	}
+
 	// Create sync_users collection
 	syncUsers := core.NewBaseCollection("sync_users")
 	syncUsers.Fields.Add(
@@ -115,7 +121,7 @@ func runTestMigrations(app core.App) error {
 		return err
 	}
 
-	// Create sync_devices collection
+	// Create sync_devices collection (without ssh fields - using JWT auth now)
 	syncDevices := core.NewBaseCollection("sync_devices")
 	syncDevices.Fields.Add(
 		&core.TextField{
@@ -127,14 +133,6 @@ func runTestMigrations(app core.App) error {
 			Required: true,
 		},
 		&core.TextField{
-			Name:     "ssh_pubkey",
-			Required: true,
-		},
-		&core.TextField{
-			Name:     "ssh_pubkey_fp",
-			Required: true,
-		},
-		&core.TextField{
 			Name: "name",
 		},
 		&core.NumberField{
@@ -142,63 +140,12 @@ func runTestMigrations(app core.App) error {
 		},
 	)
 	syncDevices.AddIndex("idx_sync_devices_device_id", true, "device_id", "")
-	syncDevices.AddIndex("idx_sync_devices_ssh_pubkey_fp", true, "ssh_pubkey_fp", "")
 	syncDevices.AddIndex("idx_sync_devices_user_id", false, "user_id", "")
 	if err := app.Save(syncDevices); err != nil {
 		return err
 	}
 
-	// Create sync_challenges collection
-	syncChallenges := core.NewBaseCollection("sync_challenges")
-	syncChallenges.Fields.Add(
-		&core.TextField{
-			Name:     "challenge_id",
-			Required: true,
-		},
-		&core.TextField{
-			Name:     "user_id",
-			Required: true,
-		},
-		&core.TextField{
-			Name:     "challenge",
-			Required: true,
-		},
-		&core.NumberField{
-			Name:     "expires_at",
-			Required: true,
-		},
-	)
-	syncChallenges.AddIndex("idx_sync_challenges_challenge_id", true, "challenge_id", "")
-	syncChallenges.AddIndex("idx_sync_challenges_user_exp", false, "user_id, expires_at", "")
-	if err := app.Save(syncChallenges); err != nil {
-		return err
-	}
-
-	// Create sync_tokens collection
-	syncTokens := core.NewBaseCollection("sync_tokens")
-	syncTokens.Fields.Add(
-		&core.TextField{
-			Name:     "token_hash",
-			Required: true,
-		},
-		&core.TextField{
-			Name:     "user_id",
-			Required: true,
-		},
-		&core.TextField{
-			Name: "device_id",
-		},
-		&core.NumberField{
-			Name:     "expires_at",
-			Required: true,
-		},
-	)
-	syncTokens.AddIndex("idx_sync_tokens_token_hash", true, "token_hash", "")
-	syncTokens.AddIndex("idx_sync_tokens_device", false, "device_id", "")
-	syncTokens.AddIndex("idx_sync_tokens_user_exp", false, "user_id, expires_at", "")
-	if err := app.Save(syncTokens); err != nil {
-		return err
-	}
+	// sync_challenges and sync_tokens collections removed - using JWT auth now
 
 	// Create sync_changes collection
 	syncChanges := core.NewBaseCollection("sync_changes")
@@ -288,10 +235,10 @@ func startTestServer(t *testing.T, srv *Server) *httptest.Server {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// Auth endpoints
-	mux.HandleFunc("/v1/auth/register", srv.handleRegister)
-	mux.HandleFunc("/v1/auth/challenge", srv.handleChallenge)
-	mux.HandleFunc("/v1/auth/verify", srv.handleVerify)
+	// PB Auth endpoints
+	mux.HandleFunc("/v1/auth/pb/register", srv.handlePBRegister)
+	mux.HandleFunc("/v1/auth/pb/login", srv.handlePBLogin)
+	mux.HandleFunc("/v1/auth/pb/refresh", srv.handlePBRefresh)
 
 	// Sync endpoints (protected)
 	mux.HandleFunc("/v1/sync/push", srv.withAuth(srv.handlePush))
@@ -311,7 +258,7 @@ func startTestServer(t *testing.T, srv *Server) *httptest.Server {
 	return ts
 }
 
-func generateKeysAndSigner(t *testing.T) (vault.Keys, ssh.Signer) {
+func generateTestKeys(t *testing.T) vault.Keys {
 	_, seedPhrase, err := vault.NewSeedPhrase()
 	if err != nil {
 		t.Fatalf("seed: %v", err)
@@ -324,24 +271,52 @@ func generateKeysAndSigner(t *testing.T) (vault.Keys, ssh.Signer) {
 	if err != nil {
 		t.Fatalf("derive keys: %v", err)
 	}
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate ssh key: %v", err)
-	}
-	signer, err := ssh.NewSignerFromKey(priv)
-	if err != nil {
-		t.Fatalf("signer: %v", err)
-	}
-	return keys, signer
+	return keys
 }
 
-func loginForToken(t *testing.T, baseURL string, ctx context.Context, keys vault.Keys, signer ssh.Signer) string {
-	authClient := vault.NewAuthClient(baseURL)
-	token, err := authClient.LoginWithSigner(ctx, keys.UserID(), signer, true)
+// createTestUserAndTokenWithID creates a PocketBase user and device, returns (token, pbRecordID).
+// Tests should use pbRecordID as userID since that's what authUserJWT returns.
+func createTestUserAndTokenWithID(t *testing.T, app core.App, deviceID string) (string, string) {
+	t.Helper()
+
+	// Create a user in the users collection
+	usersCol, err := app.FindCollectionByNameOrId("users")
 	if err != nil {
-		t.Fatalf("login: %v", err)
+		t.Fatalf("find users collection: %v", err)
 	}
-	return token.Token
+
+	userRecord := core.NewRecord(usersCol)
+	userRecord.Set("email", "test-"+deviceID+"@test.local")
+	userRecord.SetPassword("testpassword123")
+	userRecord.SetVerified(true)
+	if err := app.Save(userRecord); err != nil {
+		t.Fatalf("save user: %v", err)
+	}
+
+	// The PB record ID is what authUserJWT returns as userID
+	userID := userRecord.Id
+
+	// Create a device for this user
+	devicesCol, err := app.FindCollectionByNameOrId("sync_devices")
+	if err != nil {
+		t.Fatalf("find sync_devices collection: %v", err)
+	}
+
+	deviceRecord := core.NewRecord(devicesCol)
+	deviceRecord.Set("user_id", userID)
+	deviceRecord.Set("device_id", deviceID)
+	deviceRecord.Set("name", "test-device")
+	if err := app.Save(deviceRecord); err != nil {
+		t.Fatalf("save device: %v", err)
+	}
+
+	// Generate JWT token for this user
+	token, err := userRecord.NewStaticAuthToken(24 * time.Hour)
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
+
+	return token, userID
 }
 
 type pocketbaseAccountInitializer interface {
@@ -370,7 +345,7 @@ func (e *serverTestEnv) pushChange(t *testing.T, deviceID string) vault.Change {
 
 	client := vault.NewClient(vault.SyncConfig{BaseURL: e.server.URL, DeviceID: deviceID, AuthToken: e.token})
 	var applied []vault.Change
-	if err := vault.Sync(e.ctx, store, client, e.keys, func(ctx context.Context, c vault.Change) error {
+	if err := vault.Sync(e.ctx, store, client, e.keys, e.userID, func(ctx context.Context, c vault.Change) error {
 		applied = append(applied, c)
 		return nil
 	}); err != nil {
@@ -393,7 +368,7 @@ func (e *serverTestEnv) pullChangeOnSecondDevice(t *testing.T, deviceID, expecte
 
 	client := vault.NewClient(vault.SyncConfig{BaseURL: e.server.URL, DeviceID: deviceID, AuthToken: e.token})
 	var applied []vault.Change
-	if err := vault.Sync(e.ctx, store, client, e.keys, func(ctx context.Context, c vault.Change) error {
+	if err := vault.Sync(e.ctx, store, client, e.keys, e.userID, func(ctx context.Context, c vault.Change) error {
 		applied = append(applied, c)
 		return nil
 	}); err != nil {
@@ -435,86 +410,6 @@ func TestPushIncrementsPocketBaseUsage(t *testing.T) {
 	if call.changes != 1 {
 		t.Fatalf("expected 1 change recorded, got %d", call.changes)
 	}
-}
-
-func TestVerifyFailsWhenPocketBaseInactive(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	app := createTestApp(t, dir)
-
-	pb := &mockPocketBaseClient{
-		account:    pbclient.AccountInfo{Active: false},
-		accountSet: true,
-	}
-
-	srv := &Server{app: app, pbClient: pb}
-
-	userID, chID, sigB64 := setupTestDeviceAndChallenge(t, app)
-
-	resp, status, err := srv.processVerify(ctx, verifyReq{
-		UserID:       userID,
-		ChallengeID:  chID,
-		SignatureB64: sigB64,
-	})
-	if err == nil || status != http.StatusForbidden {
-		t.Fatalf("expected forbidden from pocketbase denial, got status=%d err=%v resp=%+v", status, err, resp)
-	}
-}
-
-func setupTestDeviceAndChallenge(t *testing.T, app core.App) (userID, chID, sigB64 string) {
-	t.Helper()
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	signer, _ := ssh.NewSignerFromKey(priv)
-	pubStr := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
-	fp := ssh.FingerprintSHA256(signer.PublicKey())
-	userID = "user-test"
-	deviceID := "device-test"
-
-	// Create user
-	usersCol, err := app.FindCollectionByNameOrId("sync_users")
-	if err != nil {
-		t.Fatalf("find users collection: %v", err)
-	}
-	userRecord := core.NewRecord(usersCol)
-	userRecord.Set("user_id", userID)
-	if err := app.Save(userRecord); err != nil {
-		t.Fatalf("insert user: %v", err)
-	}
-
-	// Create device
-	devicesCol, err := app.FindCollectionByNameOrId("sync_devices")
-	if err != nil {
-		t.Fatalf("find devices collection: %v", err)
-	}
-	deviceRecord := core.NewRecord(devicesCol)
-	deviceRecord.Set("device_id", deviceID)
-	deviceRecord.Set("user_id", userID)
-	deviceRecord.Set("ssh_pubkey", pubStr)
-	deviceRecord.Set("ssh_pubkey_fp", fp)
-	deviceRecord.Set("name", "test-device")
-	if err := app.Save(deviceRecord); err != nil {
-		t.Fatalf("insert device: %v", err)
-	}
-
-	// Create challenge
-	chID = "challenge-1"
-	challenge := []byte("challenge-bytes")
-	challengesCol, err := app.FindCollectionByNameOrId("sync_challenges")
-	if err != nil {
-		t.Fatalf("find challenges collection: %v", err)
-	}
-	challengeRecord := core.NewRecord(challengesCol)
-	challengeRecord.Set("challenge_id", chID)
-	challengeRecord.Set("user_id", userID)
-	challengeRecord.Set("challenge", base64.StdEncoding.EncodeToString(challenge))
-	challengeRecord.Set("expires_at", time.Now().Add(time.Minute).Unix())
-	if err := app.Save(challengeRecord); err != nil {
-		t.Fatalf("insert challenge: %v", err)
-	}
-
-	sig, _ := signer.Sign(rand.Reader, challenge)
-	sigB64 = base64.StdEncoding.EncodeToString(ssh.Marshal(sig))
-	return userID, chID, sigB64
 }
 
 type mockPocketBaseClient struct {
@@ -566,94 +461,6 @@ func (e *serverTestEnv) setRateLimit(interval time.Duration, burst int) {
 	e.srv.limiters.setConfig(interval, burst)
 }
 
-//nolint:funlen // Cleanup test needs comprehensive setup and verification.
-func TestCleanupPurgesExpiredTokensAndChallenges(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	app := createTestApp(t, dir)
-
-	srv := &Server{app: app, pbClient: pbclient.NoopClient{}}
-
-	now := time.Now().Unix()
-	expired := now - 3600 // 1 hour ago
-	valid := now + 3600   // 1 hour from now
-
-	// Insert expired and valid tokens
-	tokensCol, err := app.FindCollectionByNameOrId("sync_tokens")
-	if err != nil {
-		t.Fatalf("find tokens collection: %v", err)
-	}
-
-	expiredToken := core.NewRecord(tokensCol)
-	expiredToken.Set("token_hash", "expired1")
-	expiredToken.Set("user_id", "user1")
-	expiredToken.Set("device_id", "")
-	expiredToken.Set("expires_at", expired)
-	if err := app.Save(expiredToken); err != nil {
-		t.Fatalf("insert expired token: %v", err)
-	}
-
-	validToken := core.NewRecord(tokensCol)
-	validToken.Set("token_hash", "valid1")
-	validToken.Set("user_id", "user1")
-	validToken.Set("device_id", "")
-	validToken.Set("expires_at", valid)
-	if err := app.Save(validToken); err != nil {
-		t.Fatalf("insert valid token: %v", err)
-	}
-
-	// Insert expired and valid challenges
-	challengesCol, err := app.FindCollectionByNameOrId("sync_challenges")
-	if err != nil {
-		t.Fatalf("find challenges collection: %v", err)
-	}
-
-	expiredChallenge := core.NewRecord(challengesCol)
-	expiredChallenge.Set("challenge_id", "ch-expired")
-	expiredChallenge.Set("user_id", "user1")
-	expiredChallenge.Set("challenge", base64.StdEncoding.EncodeToString([]byte{0x00}))
-	expiredChallenge.Set("expires_at", expired)
-	if err := app.Save(expiredChallenge); err != nil {
-		t.Fatalf("insert expired challenge: %v", err)
-	}
-
-	validChallenge := core.NewRecord(challengesCol)
-	validChallenge.Set("challenge_id", "ch-valid")
-	validChallenge.Set("user_id", "user1")
-	validChallenge.Set("challenge", base64.StdEncoding.EncodeToString([]byte{0x00}))
-	validChallenge.Set("expires_at", valid)
-	if err := app.Save(validChallenge); err != nil {
-		t.Fatalf("insert valid challenge: %v", err)
-	}
-
-	// Run cleanup
-	deleted := srv.cleanupExpired(ctx)
-
-	if deleted.tokens != 1 {
-		t.Errorf("expected 1 expired token deleted, got %d", deleted.tokens)
-	}
-	if deleted.challenges != 1 {
-		t.Errorf("expected 1 expired challenge deleted, got %d", deleted.challenges)
-	}
-
-	// Verify valid records remain
-	remainingTokens, err := app.FindRecordsByFilter(tokensCol, "", "", 100, 0, nil)
-	if err != nil {
-		t.Fatalf("query tokens: %v", err)
-	}
-	if len(remainingTokens) != 1 {
-		t.Errorf("expected 1 token remaining, got %d", len(remainingTokens))
-	}
-
-	remainingChallenges, err := app.FindRecordsByFilter(challengesCol, "", "", 100, 0, nil)
-	if err != nil {
-		t.Fatalf("query challenges: %v", err)
-	}
-	if len(remainingChallenges) != 1 {
-		t.Errorf("expected 1 challenge remaining, got %d", len(remainingChallenges))
-	}
-}
-
 func TestRateLimitRejects429(t *testing.T) {
 	env := newServerTestEnv(t)
 
@@ -692,7 +499,6 @@ func TestRateLimitRejects429(t *testing.T) {
 }
 
 func TestMultipleDevicesCanAuthenticate(t *testing.T) {
-	ctx := context.Background()
 	dir := t.TempDir()
 	app := createTestApp(t, dir)
 	srv := &Server{
@@ -702,20 +508,11 @@ func TestMultipleDevicesCanAuthenticate(t *testing.T) {
 	}
 	ts := startTestServer(t, srv)
 
-	keys, _ := generateKeysAndSigner(t)
-	userID := keys.UserID()
+	// Create user and get both token and PB record ID (which is our userID for auth)
+	tokenA, userID := createTestUserAndTokenWithID(t, app, "device-a")
+	tokenB := createTestDeviceToken(t, app, userID, "device-b")
 
-	// Register device A
-	_, privA, _ := ed25519.GenerateKey(rand.Reader)
-	signerA, _ := ssh.NewSignerFromKey(privA)
-	tokenA := registerAndLogin(t, ts.URL, ctx, userID, signerA, "device-a")
-
-	// Register device B (should NOT invalidate device A)
-	_, privB, _ := ed25519.GenerateKey(rand.Reader)
-	signerB, _ := ssh.NewSignerFromKey(privB)
-	tokenB := registerAndLogin(t, ts.URL, ctx, userID, signerB, "device-b")
-
-	// Both tokens should work
+	// Both tokens should work (they share the same user JWT)
 	client := &http.Client{}
 
 	reqA, _ := http.NewRequest("GET", ts.URL+"/v1/sync/pull?user_id="+userID+"&since=0", nil)
@@ -745,36 +542,45 @@ func TestMultipleDevicesCanAuthenticate(t *testing.T) {
 	}
 }
 
-func registerAndLogin(t *testing.T, baseURL string, ctx context.Context, userID string, signer ssh.Signer, deviceName string) string {
-	authClient := vault.NewAuthClient(baseURL)
+// createTestDeviceToken creates an additional device for an existing user.
+// userID is the PocketBase record ID returned by createTestUserAndTokenWithID.
+func createTestDeviceToken(t *testing.T, app core.App, userID, deviceID string) string {
+	t.Helper()
 
-	// Register with device name
-	pubStr := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
-	if err := authClient.RegisterAuthorizedKeyWithDevice(ctx, userID, pubStr, deviceName); err != nil {
-		t.Fatalf("register %s: %v", deviceName, err)
+	// Find existing user by record ID
+	userRecord, err := app.FindRecordById("users", userID)
+	if err != nil {
+		t.Fatalf("find user: %v", err)
 	}
 
-	// Get challenge and login
-	ch, err := authClient.Challenge(ctx, userID)
+	// Create device for this user
+	devicesCol, err := app.FindCollectionByNameOrId("sync_devices")
 	if err != nil {
-		t.Fatalf("challenge %s: %v", deviceName, err)
+		t.Fatalf("find sync_devices collection: %v", err)
 	}
-	sig, _ := signer.Sign(rand.Reader, ch.Data)
-	sigB64 := base64.StdEncoding.EncodeToString(ssh.Marshal(sig))
-	token, err := authClient.Verify(ctx, userID, ch.ID, sigB64)
+
+	deviceRecord := core.NewRecord(devicesCol)
+	deviceRecord.Set("user_id", userID)
+	deviceRecord.Set("device_id", deviceID)
+	deviceRecord.Set("name", deviceID)
+	if err := app.Save(deviceRecord); err != nil {
+		t.Fatalf("save device: %v", err)
+	}
+
+	// Generate JWT token for user
+	token, err := userRecord.NewStaticAuthToken(24 * time.Hour)
 	if err != nil {
-		t.Fatalf("verify %s: %v", deviceName, err)
+		t.Fatalf("generate token: %v", err)
 	}
-	return token.Token
+
+	return token
 }
 
 func TestListDevices(t *testing.T) {
 	env := newServerTestEnv(t)
 
-	// Register a second device
-	_, privB, _ := ed25519.GenerateKey(rand.Reader)
-	signerB, _ := ssh.NewSignerFromKey(privB)
-	registerAndLogin(t, env.server.URL, env.ctx, env.userID, signerB, "second-device")
+	// Create a second device
+	createTestDeviceToken(t, env.srv.app, env.userID, "second-device")
 
 	// List devices
 	client := &http.Client{}
@@ -810,7 +616,6 @@ func TestListDevices(t *testing.T) {
 }
 
 func TestRevokeDevice(t *testing.T) {
-	ctx := context.Background()
 	dir := t.TempDir()
 	app := createTestApp(t, dir)
 	srv := &Server{
@@ -820,28 +625,19 @@ func TestRevokeDevice(t *testing.T) {
 	}
 	ts := startTestServer(t, srv)
 
-	keys, _ := generateKeysAndSigner(t)
-	userID := keys.UserID()
+	// Create user and get both token and PB record ID (which is our userID for auth)
+	tokenA, userID := createTestUserAndTokenWithID(t, app, "device-a")
 
-	// Register device A and B
-	_, privA, _ := ed25519.GenerateKey(rand.Reader)
-	signerA, _ := ssh.NewSignerFromKey(privA)
-	tokenA := registerAndLogin(t, ts.URL, ctx, userID, signerA, "device-a")
-
-	_, privB, _ := ed25519.GenerateKey(rand.Reader)
-	signerB, _ := ssh.NewSignerFromKey(privB)
-	tokenB := registerAndLogin(t, ts.URL, ctx, userID, signerB, "device-b")
+	// Create device B for the same user
+	createTestDeviceToken(t, app, userID, "device-b")
 
 	// Get device B's ID
-	deviceBID := getSecondDeviceID(t, ts.URL, tokenB)
+	deviceBID := getSecondDeviceID(t, ts.URL, tokenA)
 
 	// Revoke device B using device A's token
 	revokeDevice(t, ts.URL, tokenA, deviceBID)
 
-	// Verify device B token no longer works (401)
-	verifyTokenStatus(t, ts.URL, tokenB, userID, http.StatusUnauthorized)
-
-	// Verify device A token still works (200)
+	// Device A token still works (200) - JWT tokens are user-level, not device-level
 	verifyTokenStatus(t, ts.URL, tokenA, userID, http.StatusOK)
 }
 
@@ -1054,6 +850,9 @@ func verifySnapshotInPull(t *testing.T, env *serverTestEnv) {
 	}
 }
 
+// TestAccountMigration tests migrating vault data from one userID to another.
+// With JWT auth, the token remains valid after migration (JWT is PocketBase user-level,
+// not vault userID-level). The migration moves devices to the new vault userID.
 func TestAccountMigration(t *testing.T) {
 	env := newServerTestEnv(t)
 	env.pushChange(t, "device-a")
@@ -1061,7 +860,8 @@ func TestAccountMigration(t *testing.T) {
 	newUserID := generateNewUserID(t)
 	callMigrateEndpoint(t, env, newUserID)
 	verifyDevicesMigrated(t, env, newUserID)
-	verifyOldTokenInvalidated(t, env)
+	// With JWT auth, the token remains valid (it's tied to PocketBase user, not vault userID)
+	verifyTokenStillValidAfterMigration(t, env)
 }
 
 func TestRateLimiterWithZeroIntervalInServer(t *testing.T) {
@@ -1091,8 +891,10 @@ func TestRateLimiterWithZeroIntervalInServer(t *testing.T) {
 	}
 }
 
-func TestCannotRevokeSelf(t *testing.T) {
-	ctx := context.Background()
+// TestSelfRevocationAllowedWithJWTAuth verifies that with JWT auth, we cannot
+// detect which device is making the request, so self-revocation is allowed.
+// Self-revocation protection must be enforced client-side with JWT auth.
+func TestSelfRevocationAllowedWithJWTAuth(t *testing.T) {
 	dir := t.TempDir()
 	app := createTestApp(t, dir)
 	srv := &Server{
@@ -1102,18 +904,14 @@ func TestCannotRevokeSelf(t *testing.T) {
 	}
 	ts := startTestServer(t, srv)
 
-	keys, _ := generateKeysAndSigner(t)
-	userID := keys.UserID()
-
-	// Register device A
-	_, privA, _ := ed25519.GenerateKey(rand.Reader)
-	signerA, _ := ssh.NewSignerFromKey(privA)
-	tokenA := registerAndLogin(t, ts.URL, ctx, userID, signerA, "device-a")
+	// Create user and get both token and PB record ID (which is our userID for auth)
+	tokenA, userID := createTestUserAndTokenWithID(t, app, "device-a")
 
 	// Get device A's ID
 	deviceAID := getFirstDeviceID(t, ts.URL, tokenA)
 
-	// Try to revoke self - should fail
+	// With JWT auth, self-revocation succeeds because server can't detect which device
+	// is making the request (JWT tokens are user-level, not device-level)
 	client := &http.Client{}
 	req, _ := http.NewRequest("DELETE", ts.URL+"/v1/devices/"+deviceAID, nil)
 	req.Header.Set("Authorization", "Bearer "+tokenA)
@@ -1126,11 +924,11 @@ func TestCannotRevokeSelf(t *testing.T) {
 			t.Fatalf("close response: %v", err)
 		}
 	}()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403 (cannot revoke self), got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 (revocation succeeds with JWT auth), got %d", resp.StatusCode)
 	}
 
-	// Verify token still works
+	// Token still works (JWT tokens are user-level, not invalidated by device revocation)
 	verifyTokenStatus(t, ts.URL, tokenA, userID, http.StatusOK)
 }
 
@@ -1161,48 +959,6 @@ func getFirstDeviceID(t *testing.T, baseURL, token string) string {
 		t.Fatalf("expected at least 1 device, got 0")
 	}
 	return body.Devices[0].DeviceID
-}
-
-func TestSchemaAllowsEmptyDeviceID(t *testing.T) {
-	dir := t.TempDir()
-	app := createTestApp(t, dir)
-
-	_ = &Server{
-		app:      app,
-		pbClient: pbclient.NoopClient{},
-		limiters: newRateLimiterStore(DefaultRateLimitConfig()),
-	}
-
-	keys, _ := generateKeysAndSigner(t)
-	userID := keys.UserID()
-
-	tokensCol, err := app.FindCollectionByNameOrId("sync_tokens")
-	if err != nil {
-		t.Fatalf("find tokens collection: %v", err)
-	}
-
-	// Verify that empty string device_id works (for backward compatibility)
-	tokenHash := hashToken("token_with_empty_device")
-	now := time.Now().Add(12 * time.Hour).Unix()
-
-	tokenRecord := core.NewRecord(tokensCol)
-	tokenRecord.Set("token_hash", tokenHash)
-	tokenRecord.Set("user_id", userID)
-	tokenRecord.Set("device_id", "")
-	tokenRecord.Set("expires_at", now)
-	if err := app.Save(tokenRecord); err != nil {
-		t.Fatalf("inserting token with empty string device_id should work: %v", err)
-	}
-
-	// Verify we can read it back
-	foundToken, err := app.FindFirstRecordByFilter(tokensCol, "token_hash = {:token_hash}",
-		map[string]any{"token_hash": tokenHash})
-	if err != nil {
-		t.Fatalf("query token: %v", err)
-	}
-	if foundToken.GetString("device_id") != "" {
-		t.Fatalf("expected empty string device_id, got %q", foundToken.GetString("device_id"))
-	}
 }
 
 func generateNewUserID(t *testing.T) string {
@@ -1273,20 +1029,22 @@ func verifyDevicesMigrated(t *testing.T, env *serverTestEnv, newUserID string) {
 	}
 }
 
-func verifyOldTokenInvalidated(t *testing.T, env *serverTestEnv) {
+// verifyTokenStillValidAfterMigration confirms that JWT tokens remain valid after
+// vault data migration. JWT tokens are tied to PocketBase users, not vault userIDs.
+func verifyTokenStillValidAfterMigration(t *testing.T, env *serverTestEnv) {
 	t.Helper()
 	client := &http.Client{}
 	checkReq, _ := http.NewRequest("GET", env.server.URL+"/v1/sync/pull?user_id="+env.userID+"&since=0", nil)
 	checkReq.Header.Set("Authorization", "Bearer "+env.token)
 	checkResp, err := client.Do(checkReq)
 	if err != nil {
-		t.Fatalf("check old token request: %v", err)
+		t.Fatalf("check token request: %v", err)
 	}
 	if err := checkResp.Body.Close(); err != nil {
 		t.Fatalf("close check response: %v", err)
 	}
-	if checkResp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("old token should be invalidated, got %d", checkResp.StatusCode)
+	if checkResp.StatusCode != http.StatusOK {
+		t.Fatalf("token should still be valid with JWT auth, got %d", checkResp.StatusCode)
 	}
 }
 

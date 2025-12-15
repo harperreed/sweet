@@ -32,6 +32,7 @@ type syncTestEnv struct {
 	store       *Store
 	keys        Keys
 	device      string
+	userID      string // Server-side user identifier
 	fake        *fakeSyncServer
 	server      *httptest.Server
 	client      *Client
@@ -72,6 +73,7 @@ func newSyncTestEnv(t *testing.T) *syncTestEnv {
 		store:  store,
 		keys:   keys,
 		device: "dev-a",
+		userID: keys.UserID(), // In tests with fake server, vault-derived ID is fine
 		fake:   fake,
 		server: ts,
 		client: client,
@@ -99,7 +101,7 @@ func (e *syncTestEnv) enqueueLocalChange(t *testing.T, entity, id string, payloa
 
 func (e *syncTestEnv) syncExpectPush(t *testing.T) {
 	var applied []Change
-	if err := Sync(e.ctx, e.store, e.client, e.keys, func(ctx context.Context, c Change) error {
+	if err := Sync(e.ctx, e.store, e.client, e.keys, e.userID, func(ctx context.Context, c Change) error {
 		applied = append(applied, c)
 		return nil
 	}); err != nil {
@@ -145,7 +147,7 @@ func (e *syncTestEnv) prepareRemoteChange(t *testing.T, entity, id string, paylo
 
 func (e *syncTestEnv) syncExpectPull(t *testing.T) {
 	var applied []Change
-	if err := Sync(e.ctx, e.store, e.client, e.keys, func(ctx context.Context, c Change) error {
+	if err := Sync(e.ctx, e.store, e.client, e.keys, e.userID, func(ctx context.Context, c Change) error {
 		applied = append(applied, c)
 		return nil
 	}); err != nil {
