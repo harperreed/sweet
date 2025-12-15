@@ -217,7 +217,8 @@ func (s *Syncer) QueueItemChange(ctx context.Context, id uuid.UUID, name string,
         return fmt.Errorf("create change: %w", err)
     }
 
-    userID := s.keys.UserID()
+    // IMPORTANT: Use the same userID for AAD and Sync() calls
+    userID := s.config.UserID
     aad := change.AAD(userID, s.config.DeviceID)
     plaintext, err := json.Marshal(change)
     if err != nil {
@@ -472,6 +473,41 @@ See the [position](https://github.com/harperreed/position) CLI for a complete wo
 - `internal/sync/sync.go` - Syncer with entity handlers
 - `cmd/position/sync.go` - CLI commands (init, login, status, now, logout)
 - `cmd/position/add.go` - Wiring sync into mutations
+
+## Common Pitfalls
+
+### UserID Mismatch (AAD Error)
+
+**Symptom:** `chacha20poly1305: message authentication failed` during sync pull
+
+**Cause:** Using different `userID` values for encryption vs sync. The AAD (Additional Authenticated Data) must match exactly between encryption and decryption.
+
+**Wrong:**
+```go
+// Encryption - using vault-derived ID
+aad := change.AAD(s.keys.UserID(), s.config.DeviceID)
+
+// Sync - using PocketBase ID (DIFFERENT!)
+vault.Sync(ctx, store, client, keys, s.config.UserID, apply)
+```
+
+**Right:**
+```go
+// Pick ONE identifier and use it consistently
+userID := s.config.UserID  // PocketBase record ID
+
+// Encryption
+aad := change.AAD(userID, s.config.DeviceID)
+
+// Sync - same userID
+vault.Sync(ctx, store, client, keys, userID, apply)
+```
+
+The vault library is flexible - it doesn't care which identifier you use. Just be consistent:
+- `change.AAD(userID, deviceID)` during encryption
+- `vault.Sync(..., userID, ...)` during sync
+
+Both `keys.UserID()` (vault-derived) and PocketBase record IDs work fine. Pick one.
 
 ## Troubleshooting
 
