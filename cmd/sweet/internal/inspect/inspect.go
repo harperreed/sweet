@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -43,6 +44,10 @@ type SummaryRow struct {
 func (i *Inspector) Summary(ctx context.Context) ([]SummaryRow, error) {
 	rows, err := i.db.QueryContext(ctx, `SELECT entity, COUNT(*) FROM records GROUP BY entity ORDER BY entity`)
 	if err != nil {
+		// Handle missing table gracefully
+		if isNoSuchTable(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	defer func() {
@@ -84,6 +89,9 @@ WHERE entity = ?
 ORDER BY updated_at DESC
 LIMIT ?`, entity, limit)
 	if err != nil {
+		if isNoSuchTable(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	defer func() {
@@ -99,4 +107,9 @@ LIMIT ?`, entity, limit)
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// isNoSuchTable checks if the error is a "no such table" SQLite error.
+func isNoSuchTable(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no such table")
 }

@@ -17,6 +17,7 @@ import (
 type Config struct {
 	Server       string `json:"server"`
 	Email        string `json:"email"`
+	UserID       string `json:"user_id"` // PocketBase record ID from login
 	Token        string `json:"token"`
 	RefreshToken string `json:"refresh_token"`
 	TokenExpires string `json:"token_expires,omitempty"`

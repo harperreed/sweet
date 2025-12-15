@@ -91,6 +91,7 @@ func cmdRegister(args []string) error {
 	}
 	cfg.Server = *server
 	cfg.Email = email
+	cfg.UserID = result.UserID
 	cfg.Token = result.Token.Token
 	cfg.TokenExpires = result.Token.Expires.Format(time.RFC3339)
 	cfg.Mnemonic = result.Mnemonic // TODO: encrypt locally
@@ -178,6 +179,7 @@ func cmdLogin(args []string) error {
 	// Save config
 	cfg.Server = serverURL
 	cfg.Email = email
+	cfg.UserID = result.UserID
 	cfg.Token = result.Token.Token
 	cfg.RefreshToken = result.RefreshToken
 	cfg.TokenExpires = result.Token.Expires.Format(time.RFC3339)

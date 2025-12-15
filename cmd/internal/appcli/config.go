@@ -11,6 +11,7 @@ type RuntimeConfig struct {
 	DeviceID   string
 	ServerURL  string
 	AuthToken  string
+	UserID     string // Server-side user ID (PocketBase record ID)
 }
 
 // BindFlags attaches shared flags to provided FlagSet.
@@ -35,5 +36,6 @@ func (rc RuntimeConfig) Options(entity string) Options {
 		DeviceID:   rc.DeviceID,
 		ServerURL:  rc.ServerURL,
 		AuthToken:  rc.AuthToken,
+		UserID:     rc.UserID,
 	}
 }
