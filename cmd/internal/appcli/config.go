@@ -15,7 +15,7 @@ type RuntimeConfig struct {
 
 // BindFlags attaches shared flags to provided FlagSet.
 func (rc *RuntimeConfig) BindFlags(fs *flag.FlagSet) {
-	fs.StringVar(&rc.SeedPhrase, "seed", rc.SeedPhrase, "seed phrase (hex)")
+	fs.StringVar(&rc.SeedPhrase, "seed", rc.SeedPhrase, "seed phrase (mnemonic or hex)")
 	fs.StringVar(&rc.Passphrase, "passphrase", rc.Passphrase, "optional passphrase")
 	fs.StringVar(&rc.VaultPath, "vault-db", rc.VaultPath, "path to vault SQLite store")
 	fs.StringVar(&rc.AppDBPath, "app-db", rc.AppDBPath, "path to local entity SQLite db")

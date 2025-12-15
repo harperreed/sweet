@@ -22,12 +22,28 @@ func NewSeedPhrase() (SeedPhrase, string, error) {
 	return SeedPhrase{Raw: b}, phrase, nil
 }
 
-// ParseSeedPhrase converts the provided hex string back into bytes.
+// ParseSeedPhrase parses a seed from either BIP39 mnemonic or hex format.
+// It auto-detects the format: if it contains spaces, it's treated as mnemonic.
 func ParseSeedPhrase(phrase string) (SeedPhrase, error) {
 	phrase = strings.TrimSpace(phrase)
 	if phrase == "" {
 		return SeedPhrase{}, errors.New("seed phrase required")
 	}
+
+	// If it contains spaces, try to parse as BIP39 mnemonic
+	if strings.Contains(phrase, " ") {
+		seed, err := ParseMnemonic(phrase)
+		if err != nil {
+			return SeedPhrase{}, err
+		}
+		// BIP39 seed is 64 bytes, take first 32 for our key derivation
+		if len(seed) < 32 {
+			return SeedPhrase{}, errors.New("mnemonic seed too short")
+		}
+		return SeedPhrase{Raw: seed[:32]}, nil
+	}
+
+	// Otherwise try hex decoding
 	b, err := hex.DecodeString(phrase)
 	if err != nil {
 		return SeedPhrase{}, err
