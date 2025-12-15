@@ -235,6 +235,9 @@ func startTestServer(t *testing.T, srv *Server) *httptest.Server {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	// Health endpoint for clients
+	mux.HandleFunc("/v1/health", srv.handleHealth)
+
 	// PB Auth endpoints
 	mux.HandleFunc("/v1/auth/pb/register", srv.handlePBRegister)
 	mux.HandleFunc("/v1/auth/pb/login", srv.handlePBLogin)
@@ -1130,5 +1133,36 @@ func verifyPulledItemsDeviceIDs(t *testing.T, env *serverTestEnv, items []vault.
 		if err := json.Unmarshal(plaintext, &change); err != nil {
 			t.Errorf("unmarshal change %d: %v", i, err)
 		}
+	}
+}
+
+func TestHealthEndpoint(t *testing.T) {
+	env := newServerTestEnv(t)
+
+	client := &http.Client{}
+	req, _ := http.NewRequest("GET", env.server.URL+"/v1/health", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("health request: %v", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body struct {
+		Time int64 `json:"time"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	// Verify timestamp is within 1 minute of current time
+	now := time.Now().Unix()
+	if body.Time < now-60 || body.Time > now+60 {
+		t.Errorf("server time %d is too far from now %d", body.Time, now)
 	}
 }

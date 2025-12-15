@@ -3,6 +3,7 @@ package vault
 import (
 	"context"
 	"database/sql"
+	"strconv"
 
 	_ "modernc.org/sqlite"
 )
@@ -137,4 +138,37 @@ func (s *Store) SetState(ctx context.Context, key, val string) error {
 INSERT INTO sync_state(k,v) VALUES(?,?)
 ON CONFLICT(k) DO UPDATE SET v=excluded.v`, key, val)
 	return err
+}
+
+// PendingCount returns the number of changes waiting to sync.
+func (s *Store) PendingCount(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox`).Scan(&count)
+	return count, err
+}
+
+// SyncStatus contains current sync state.
+type SyncStatus struct {
+	PendingChanges int
+	LastPulledSeq  int64
+}
+
+// SyncStatus returns current sync state.
+func (s *Store) SyncStatus(ctx context.Context) (SyncStatus, error) {
+	pending, err := s.PendingCount(ctx)
+	if err != nil {
+		return SyncStatus{}, err
+	}
+
+	seqStr, err := s.GetState(ctx, "last_pulled_seq", "0")
+	if err != nil {
+		return SyncStatus{}, err
+	}
+
+	seq, _ := strconv.ParseInt(seqStr, 10, 64)
+
+	return SyncStatus{
+		PendingChanges: pending,
+		LastPulledSeq:  seq,
+	}, nil
 }

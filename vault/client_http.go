@@ -200,3 +200,80 @@ func (c *Client) Compact(ctx context.Context, userID, entity string) error {
 
 	return nil
 }
+
+// HealthStatus contains server connectivity info.
+type HealthStatus struct {
+	OK           bool
+	Latency      time.Duration
+	ServerTime   time.Time
+	TokenValid   bool
+	TokenExpires time.Time
+}
+
+// Health checks server connectivity and token validity.
+func (c *Client) Health(ctx context.Context) HealthStatus {
+	start := time.Now()
+	status := HealthStatus{
+		TokenExpires: c.cfg.TokenExpires,
+		TokenValid:   time.Until(c.cfg.TokenExpires) > 0,
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.cfg.BaseURL+"/v1/health", nil)
+	if err != nil {
+		return status
+	}
+	req.Header.Set("Authorization", "Bearer "+c.cfg.AuthToken)
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return status
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	status.Latency = time.Since(start)
+	status.OK = resp.StatusCode == http.StatusOK
+
+	var body struct {
+		Time int64 `json:"time"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&body) == nil && body.Time > 0 {
+		status.ServerTime = time.Unix(body.Time, 0)
+	}
+
+	return status
+}
+
+// EnsureValidToken refreshes the token if it's expired or about to expire.
+// Returns ErrTokenExpired if refresh is needed but no refresh token is available.
+func (c *Client) EnsureValidToken(ctx context.Context) error {
+	// Token valid for more than 5 minutes - no refresh needed
+	if time.Until(c.cfg.TokenExpires) > 5*time.Minute {
+		return nil
+	}
+
+	// No refresh token available
+	if c.cfg.RefreshToken == "" {
+		return ErrTokenExpired
+	}
+
+	// Perform refresh
+	auth := NewPBAuthClient(c.cfg.BaseURL)
+	result, err := auth.Refresh(ctx, c.cfg.RefreshToken)
+	if err != nil {
+		return ErrTokenExpired
+	}
+
+	// Update in-memory config
+	c.cfg.AuthToken = result.Token.Token
+	c.cfg.RefreshToken = result.RefreshToken
+	c.cfg.TokenExpires = result.Token.Expires
+
+	// Notify callback to persist tokens
+	if c.cfg.OnTokenRefresh != nil {
+		c.cfg.OnTokenRefresh(result.Token.Token, result.RefreshToken, result.Token.Expires)
+	}
+
+	return nil
+}

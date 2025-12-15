@@ -298,3 +298,65 @@ func buildPushItemsWithDeviceIDs(t *testing.T, keys Keys, deviceIDs []string) []
 	}
 	return pushItems
 }
+
+func TestSyncEvents(t *testing.T) {
+	env := newSyncTestEnv(t)
+
+	// Track events
+	var started, completed bool
+	var pushedTotal, pulledTotal int
+
+	events := &SyncEvents{
+		OnStart: func() {
+			started = true
+		},
+		OnPush: func(pushed, remaining int) {
+			pushedTotal += pushed
+		},
+		OnPull: func(pulled int) {
+			pulledTotal = pulled
+		},
+		OnComplete: func(pushed, pulled int) {
+			completed = true
+		},
+	}
+
+	// Enqueue a local change
+	env.enqueueLocalChange(t, "test", "1", map[string]any{"x": 1})
+
+	// Prepare a remote change
+	env.prepareRemoteChange(t, "test", "2", map[string]any{"y": 2})
+
+	// Sync with events
+	err := Sync(env.ctx, env.store, env.client, env.keys, env.userID, func(ctx context.Context, c Change) error {
+		return nil
+	}, events)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	if !started {
+		t.Error("OnStart was not called")
+	}
+	if !completed {
+		t.Error("OnComplete was not called")
+	}
+	if pushedTotal != 1 {
+		t.Errorf("expected 1 pushed, got %d", pushedTotal)
+	}
+	if pulledTotal != 1 {
+		t.Errorf("expected 1 pulled, got %d", pulledTotal)
+	}
+}
+
+func TestSyncEvents_NilEvents(t *testing.T) {
+	env := newSyncTestEnv(t)
+
+	// Should work with nil events
+	err := Sync(env.ctx, env.store, env.client, env.keys, env.userID, func(ctx context.Context, c Change) error {
+		return nil
+	}, nil)
+	if err != nil {
+		t.Fatalf("sync with nil events: %v", err)
+	}
+}

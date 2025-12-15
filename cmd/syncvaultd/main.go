@@ -63,6 +63,9 @@ func (s *Server) registerRoutes(r *router.Router[*core.RequestEvent]) {
 		return e.NoContent(http.StatusOK)
 	})
 
+	// Health endpoint for clients (returns JSON with server time)
+	r.GET("/v1/health", s.wrapHandler(s.handleHealth))
+
 	// Auth endpoints (with IP-based rate limiting)
 	r.POST("/v1/auth/pb/register", s.wrapHandler(s.withIPRateLimit(s.handlePBRegister)))
 	r.POST("/v1/auth/pb/login", s.wrapHandler(s.withIPRateLimit(s.handlePBLogin)))
@@ -410,6 +413,17 @@ func (s *Server) queryChanges(_ context.Context, userID string, since int64) ([]
 		}
 	}
 	return items, nil
+}
+
+// handleHealth returns server health info for client connectivity checks.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		fail(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	ok(w, map[string]any{
+		"time": time.Now().Unix(),
+	})
 }
 
 // helpers
