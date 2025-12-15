@@ -50,6 +50,46 @@ func TestUserIDDifferentSeeds(t *testing.T) {
 	}
 }
 
+func TestDeriveAppKey(t *testing.T) {
+	seed := make([]byte, 64)
+	for i := range seed {
+		seed[i] = byte(i)
+	}
+
+	sweetKey, err := DeriveAppKey(seed, "sweet")
+	if err != nil {
+		t.Fatalf("DeriveAppKey failed: %v", err)
+	}
+
+	todoKey, err := DeriveAppKey(seed, "todo")
+	if err != nil {
+		t.Fatalf("DeriveAppKey failed: %v", err)
+	}
+
+	if len(sweetKey) != 32 {
+		t.Errorf("expected 32 byte key, got %d", len(sweetKey))
+	}
+
+	// Different apps must get different keys
+	if string(sweetKey) == string(todoKey) {
+		t.Error("different apps should derive different keys")
+	}
+}
+
+func TestDeriveAppKeySameAppSameKey(t *testing.T) {
+	seed := make([]byte, 64)
+	for i := range seed {
+		seed[i] = byte(i)
+	}
+
+	key1, _ := DeriveAppKey(seed, "sweet")
+	key2, _ := DeriveAppKey(seed, "sweet")
+
+	if string(key1) != string(key2) {
+		t.Error("same app should derive same key")
+	}
+}
+
 func bytes32(fill byte) []byte {
 	b := make([]byte, 32)
 	for i := range b {

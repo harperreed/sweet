@@ -3,6 +3,7 @@ package vault
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 
 	"golang.org/x/crypto/argon2"
@@ -52,4 +53,26 @@ func DeriveKeys(seed SeedPhrase, passphrase string, params KDFParams) (Keys, err
 func (k Keys) UserID() string {
 	sum := sha256.Sum256(k.UserKey[:])
 	return hex.EncodeToString(sum[:16])
+}
+
+// DeriveAppKey derives an app-specific 32-byte encryption key from a BIP39 seed.
+// Each app (sweet, todo, notes, etc.) gets a unique key derived from the same seed.
+func DeriveAppKey(seed []byte, appID string) ([]byte, error) {
+	if len(seed) == 0 {
+		return nil, errors.New("seed required")
+	}
+	if appID == "" {
+		return nil, errors.New("app ID required")
+	}
+
+	// Use HKDF with app-specific info to derive unique key per app
+	info := []byte("syncvault:v1:app:" + appID)
+	reader := hkdf.New(sha256.New, seed, nil, info)
+
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(reader, key); err != nil {
+		return nil, err
+	}
+
+	return key, nil
 }
