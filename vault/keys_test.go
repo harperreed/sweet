@@ -82,11 +82,69 @@ func TestDeriveAppKeySameAppSameKey(t *testing.T) {
 		seed[i] = byte(i)
 	}
 
-	key1, _ := DeriveAppKey(seed, "sweet")
-	key2, _ := DeriveAppKey(seed, "sweet")
+	key1, err := DeriveAppKey(seed, "sweet")
+	if err != nil {
+		t.Fatalf("DeriveAppKey failed: %v", err)
+	}
+	key2, err := DeriveAppKey(seed, "sweet")
+	if err != nil {
+		t.Fatalf("DeriveAppKey failed: %v", err)
+	}
 
 	if string(key1) != string(key2) {
 		t.Error("same app should derive same key")
+	}
+}
+
+func TestDeriveAppKeyEmptySeed(t *testing.T) {
+	// Test with nil seed
+	_, err := DeriveAppKey(nil, "sweet")
+	if err == nil {
+		t.Error("expected error when seed is nil")
+	}
+
+	// Test with empty seed
+	_, err = DeriveAppKey([]byte{}, "sweet")
+	if err == nil {
+		t.Error("expected error when seed is empty")
+	}
+}
+
+func TestDeriveAppKeyEmptyAppID(t *testing.T) {
+	seed := make([]byte, 64)
+	for i := range seed {
+		seed[i] = byte(i)
+	}
+
+	_, err := DeriveAppKey(seed, "")
+	if err == nil {
+		t.Error("expected error when appID is empty")
+	}
+}
+
+func TestDeriveAppKeyDifferentSeeds(t *testing.T) {
+	seed1 := make([]byte, 64)
+	for i := range seed1 {
+		seed1[i] = byte(i)
+	}
+
+	seed2 := make([]byte, 64)
+	for i := range seed2 {
+		seed2[i] = byte(i + 1)
+	}
+
+	key1, err := DeriveAppKey(seed1, "sweet")
+	if err != nil {
+		t.Fatalf("DeriveAppKey with seed1 failed: %v", err)
+	}
+
+	key2, err := DeriveAppKey(seed2, "sweet")
+	if err != nil {
+		t.Fatalf("DeriveAppKey with seed2 failed: %v", err)
+	}
+
+	if string(key1) == string(key2) {
+		t.Error("different seeds should derive different keys for same app")
 	}
 }
 
