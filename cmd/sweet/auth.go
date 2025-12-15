@@ -315,6 +315,39 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%ds", s)
 }
 
+// cmdWhoami shows current account identity.
+func cmdWhoami(args []string) error {
+	fs := flag.NewFlagSet("whoami", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	if cfg.Email == "" {
+		fmt.Println("Not logged in")
+		return nil
+	}
+
+	fmt.Println(cfg.Email)
+
+	// Show derived user ID if mnemonic is available
+	if cfg.Mnemonic != "" {
+		seed, err := vault.ParseSeedPhrase(cfg.Mnemonic)
+		if err == nil {
+			keys, err := vault.DeriveKeys(seed, "", vault.DefaultKDFParams())
+			if err == nil {
+				fmt.Printf("vault:%s\n", keys.UserID())
+			}
+		}
+	}
+
+	return nil
+}
+
 // randHex returns n random bytes hex-encoded (2n chars).
 func randHex(n int) string {
 	b := make([]byte, n)

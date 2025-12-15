@@ -42,6 +42,10 @@ func main() {
 		if err := cmdStatus(os.Args[2:]); err != nil {
 			log.Fatal(err)
 		}
+	case "whoami":
+		if err := cmdWhoami(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
 	case "init":
 		if err := cmdInit(os.Args[2:]); err != nil {
 			log.Fatal(err)
@@ -144,5 +148,5 @@ func mustParse(args []string, fs *flag.FlagSet) {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "sweet commands: summary | list | register | login | logout | status | init | reset | kv\n")
+	fmt.Fprintf(os.Stderr, "sweet commands: summary | list | register | login | logout | status | whoami | init | reset | kv\n")
 }
