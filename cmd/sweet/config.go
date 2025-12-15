@@ -21,7 +21,7 @@ type Config struct {
 	Token        string `json:"token"`
 	RefreshToken string `json:"refresh_token"`
 	TokenExpires string `json:"token_expires,omitempty"`
-	Mnemonic     string `json:"mnemonic"` // BIP39 seed phrase - TODO: encrypt locally
+	DerivedKey   string `json:"derived_key"` // Hex-encoded 32-byte key derived from mnemonic
 	AppID        string `json:"app_id"`
 	DeviceID     string `json:"device_id"`
 	AppDB        string `json:"app_db"`

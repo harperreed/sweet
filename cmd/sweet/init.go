@@ -49,21 +49,21 @@ func cmdReset(args []string) error {
 	configDir := ConfigDir()
 	configPath := ConfigPath()
 
-	// Try to preserve mnemonic if requested
-	var existingMnemonic string
+	// Try to preserve derived key if requested
+	var existingDerivedKey string
 	if *keepSeed {
 		cfg, err := LoadConfig()
-		if err == nil && cfg.Mnemonic != "" {
-			existingMnemonic = cfg.Mnemonic
-			fmt.Fprintf(os.Stderr, "Found existing recovery phrase, will preserve it.\n")
+		if err == nil && cfg.DerivedKey != "" {
+			existingDerivedKey = cfg.DerivedKey
+			fmt.Fprintf(os.Stderr, "Found existing encryption key, will preserve it.\n")
 		}
 	}
 
 	// Confirm with user unless --force
 	if !*force {
 		fmt.Printf("This will remove everything in %s and create a fresh config.\n", configDir)
-		if existingMnemonic == "" {
-			fmt.Println("WARNING: Your recovery phrase will be lost! Make sure you have it backed up.")
+		if existingDerivedKey == "" {
+			fmt.Println("WARNING: Your encryption keys will be lost! Make sure you have your recovery phrase backed up.")
 		}
 		fmt.Print("Continue? [y/N]: ")
 
@@ -113,13 +113,13 @@ func cmdReset(args []string) error {
 		return err
 	}
 
-	// Restore mnemonic if we preserved it
-	if existingMnemonic != "" {
-		cfg.Mnemonic = existingMnemonic
+	// Restore derived key if we preserved it
+	if existingDerivedKey != "" {
+		cfg.DerivedKey = existingDerivedKey
 		if err := SaveConfig(cfg); err != nil {
-			return fmt.Errorf("save config with preserved mnemonic: %w", err)
+			return fmt.Errorf("save config with preserved key: %w", err)
 		}
-		fmt.Println("Restored existing recovery phrase.")
+		fmt.Println("Restored existing encryption key.")
 	}
 
 	fmt.Printf("\nDevice ID: %s\n", cfg.DeviceID)

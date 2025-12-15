@@ -110,12 +110,12 @@ func TestSaveAndLoadConfig(t *testing.T) {
 
 	// Create a config
 	originalCfg := &Config{
-		Mnemonic: "test-seed-phrase",
-		Server:   "https://test.example.com",
-		Token:    "test-token",
-		AppDB:    filepath.Join(tmpDir, "app.db"),
-		VaultDB:  filepath.Join(tmpDir, "vault.db"),
-		DeviceID: "test-device-123",
+		DerivedKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		Server:     "https://test.example.com",
+		Token:      "test-token",
+		AppDB:      filepath.Join(tmpDir, "app.db"),
+		VaultDB:    filepath.Join(tmpDir, "vault.db"),
+		DeviceID:   "test-device-123",
 	}
 
 	// Save it
@@ -130,8 +130,8 @@ func TestSaveAndLoadConfig(t *testing.T) {
 	}
 
 	// Compare
-	if loadedCfg.Mnemonic != originalCfg.Mnemonic {
-		t.Errorf("Mnemonic mismatch: got %s, want %s", loadedCfg.Mnemonic, originalCfg.Mnemonic)
+	if loadedCfg.DerivedKey != originalCfg.DerivedKey {
+		t.Errorf("DerivedKey mismatch: got %s, want %s", loadedCfg.DerivedKey, originalCfg.DerivedKey)
 	}
 	if loadedCfg.Server != originalCfg.Server {
 		t.Errorf("Server mismatch: got %s, want %s", loadedCfg.Server, originalCfg.Server)
@@ -173,9 +173,9 @@ func TestInitConfig(t *testing.T) {
 	_ = w.Close()
 	os.Stderr = oldStderr
 
-	// Verify config was created with device ID (mnemonic comes from register/login)
-	if cfg.Mnemonic != "" {
-		t.Error("Mnemonic should be empty (obtained via register/login)")
+	// Verify config was created with device ID (derived key comes from register/login)
+	if cfg.DerivedKey != "" {
+		t.Error("DerivedKey should be empty (obtained via register/login)")
 	}
 	if cfg.DeviceID == "" {
 		t.Error("DeviceID not generated")
@@ -222,7 +222,7 @@ func TestConfigExists(t *testing.T) {
 		t.Fatalf("EnsureConfigDir failed: %v", err)
 	}
 	cfg := &Config{
-		Mnemonic: "test",
+		DerivedKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 	}
 	if err := SaveConfig(cfg); err != nil {
 		t.Fatalf("SaveConfig failed: %v", err)

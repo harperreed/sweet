@@ -84,6 +84,13 @@ func cmdRegister(args []string) error {
 	fmt.Print("\nPress Enter after you've saved this phrase...")
 	_, _ = reader.ReadString('\n')
 
+	// Derive key from mnemonic (we only store the derived key, not the mnemonic)
+	seed, err := vault.ParseSeedPhrase(result.Mnemonic)
+	if err != nil {
+		return fmt.Errorf("parse mnemonic: %w", err)
+	}
+	derivedKeyHex := hex.EncodeToString(seed.Raw)
+
 	// Save config
 	cfg, _ := LoadConfig()
 	if cfg == nil {
@@ -94,7 +101,7 @@ func cmdRegister(args []string) error {
 	cfg.UserID = result.UserID
 	cfg.Token = result.Token.Token
 	cfg.TokenExpires = result.Token.Expires.Format(time.RFC3339)
-	cfg.Mnemonic = result.Mnemonic // TODO: encrypt locally
+	cfg.DerivedKey = derivedKeyHex
 	cfg.AppID = appID
 	if cfg.DeviceID == "" {
 		cfg.DeviceID = randHex(16)
@@ -176,6 +183,13 @@ func cmdLogin(args []string) error {
 		return fmt.Errorf("login failed: %w", err)
 	}
 
+	// Derive key from mnemonic (we only store the derived key, not the mnemonic)
+	seed, err := vault.ParseSeedPhrase(mnemonic)
+	if err != nil {
+		return fmt.Errorf("parse mnemonic: %w", err)
+	}
+	derivedKeyHex := hex.EncodeToString(seed.Raw)
+
 	// Save config
 	cfg.Server = serverURL
 	cfg.Email = email
@@ -183,7 +197,7 @@ func cmdLogin(args []string) error {
 	cfg.Token = result.Token.Token
 	cfg.RefreshToken = result.RefreshToken
 	cfg.TokenExpires = result.Token.Expires.Format(time.RFC3339)
-	cfg.Mnemonic = mnemonic // TODO: encrypt locally
+	cfg.DerivedKey = derivedKeyHex
 	cfg.AppID = appID
 	if cfg.DeviceID == "" {
 		cfg.DeviceID = randHex(16)
@@ -253,10 +267,10 @@ func cmdStatus(args []string) error {
 	fmt.Printf("App ID:    %s\n", valueOrNone(cfg.AppID))
 	fmt.Printf("Device ID: %s\n", valueOrNone(cfg.DeviceID))
 
-	if cfg.Mnemonic != "" {
-		fmt.Println("Recovery:  ✓ stored")
+	if cfg.DerivedKey != "" {
+		fmt.Println("Keys:      ✓ configured")
 	} else {
-		fmt.Println("Recovery:  (not set)")
+		fmt.Println("Keys:      (not set)")
 	}
 
 	printTokenStatus(cfg)
@@ -336,9 +350,9 @@ func cmdWhoami(args []string) error {
 
 	fmt.Println(cfg.Email)
 
-	// Show derived user ID if mnemonic is available
-	if cfg.Mnemonic != "" {
-		seed, err := vault.ParseSeedPhrase(cfg.Mnemonic)
+	// Show derived user ID if derived key is available
+	if cfg.DerivedKey != "" {
+		seed, err := vault.ParseSeedPhrase(cfg.DerivedKey)
 		if err == nil {
 			keys, err := vault.DeriveKeys(seed, "", vault.DefaultKDFParams())
 			if err == nil {

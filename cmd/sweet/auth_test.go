@@ -21,7 +21,7 @@ func TestCmdLogout(t *testing.T) {
 	// Create config with token
 	cfg := &Config{
 		Email:        "test@example.com",
-		Mnemonic:     "test mnemonic phrase",
+		DerivedKey:   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		Server:       "https://example.com",
 		Token:        "test-token-12345",
 		RefreshToken: "test-refresh-token",
@@ -57,8 +57,8 @@ func TestCmdLogout(t *testing.T) {
 		t.Errorf("expected token_expires to be cleared, got %s", cfg.TokenExpires)
 	}
 	// Other fields should remain
-	if cfg.Mnemonic != "test mnemonic phrase" {
-		t.Error("mnemonic should not be cleared")
+	if cfg.DerivedKey != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" {
+		t.Error("derived key should not be cleared")
 	}
 	if cfg.Email != "test@example.com" {
 		t.Error("email should not be cleared")
@@ -105,13 +105,13 @@ func TestCmdStatus(t *testing.T) {
 
 	t.Run("initialized_not_logged_in", func(t *testing.T) {
 		cfg := &Config{
-			Email:    "test@example.com",
-			Mnemonic: "test mnemonic phrase words",
-			Server:   "https://example.com",
-			Token:    "",
-			DeviceID: "test-device",
-			AppDB:    filepath.Join(configDir, "app.db"),
-			VaultDB:  filepath.Join(configDir, "vault.db"),
+			Email:      "test@example.com",
+			DerivedKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			Server:     "https://example.com",
+			Token:      "",
+			DeviceID:   "test-device",
+			AppDB:      filepath.Join(configDir, "app.db"),
+			VaultDB:    filepath.Join(configDir, "vault.db"),
 		}
 		if err := SaveConfig(cfg); err != nil {
 			t.Fatalf("save config: %v", err)
@@ -192,12 +192,12 @@ func TestCmdLogoutNotLoggedIn(t *testing.T) {
 	defer func() { ConfigPath = originalConfigPath }()
 
 	cfg := &Config{
-		Mnemonic: "test mnemonic",
-		Server:   "https://example.com",
-		Token:    "", // No token
-		DeviceID: "test-device",
-		AppDB:    filepath.Join(configDir, "app.db"),
-		VaultDB:  filepath.Join(configDir, "vault.db"),
+		DerivedKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		Server:     "https://example.com",
+		Token:      "", // No token
+		DeviceID:   "test-device",
+		AppDB:      filepath.Join(configDir, "app.db"),
+		VaultDB:    filepath.Join(configDir, "vault.db"),
 	}
 	if err := os.MkdirAll(configDir, 0o750); err != nil {
 		t.Fatalf("create config dir: %v", err)
