@@ -67,11 +67,10 @@ jobs:
           cache: true
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v6
         with:
-          version: v2.7.2
+          version: v1.62.2
           args: --timeout=10m
-          verify: false
 
   build:
     name: Build
@@ -90,11 +89,11 @@ jobs:
         run: make build
 
       - name: Verify binary
-        run: ./sweet --help
+        run: ./bin/sweet --help
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: sweet-linux-amd64
-          path: sweet
+          path: bin/sweet
           retention-days: 7

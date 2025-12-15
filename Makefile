@@ -25,6 +25,14 @@ test:
 test-verbose:
 	go test -v ./...
 
+# Run tests with race detector
+test-race:
+	go test -race ./...
+
+# Run tests with coverage
+test-coverage:
+	go test -coverprofile=coverage.out ./...
+
 # Run server locally
 run: build-server
 	./bin/syncvaultd serve --http=0.0.0.0:8090 --dir=./pb_data
