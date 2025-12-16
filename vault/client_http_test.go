@@ -222,3 +222,100 @@ func TestNewClient_ValidUUID_Works(t *testing.T) {
 		t.Errorf("AppID = %q, want %q", client.cfg.AppID, "550e8400-e29b-41d4-a716-446655440000")
 	}
 }
+
+func TestPrefixedEntity_AddsCorrectPrefix(t *testing.T) {
+	client := NewClient(SyncConfig{
+		AppID:    "550e8400-e29b-41d4-a716-446655440000",
+		BaseURL:  "http://localhost",
+		DeviceID: "test-device",
+	})
+
+	tests := []struct {
+		entity string
+		want   string
+	}{
+		{"item", "550e8400-e29b-41d4-a716-446655440000.item"},
+		{"user", "550e8400-e29b-41d4-a716-446655440000.user"},
+		{"task", "550e8400-e29b-41d4-a716-446655440000.task"},
+		{"", "550e8400-e29b-41d4-a716-446655440000."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.entity, func(t *testing.T) {
+			got := client.prefixedEntity(tt.entity)
+			if got != tt.want {
+				t.Errorf("prefixedEntity(%q) = %q, want %q", tt.entity, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStripPrefix_RemovesPrefixCorrectly(t *testing.T) {
+	client := NewClient(SyncConfig{
+		AppID:    "550e8400-e29b-41d4-a716-446655440000",
+		BaseURL:  "http://localhost",
+		DeviceID: "test-device",
+	})
+
+	tests := []struct {
+		name   string
+		entity string
+		want   string
+	}{
+		{
+			name:   "prefixed entity",
+			entity: "550e8400-e29b-41d4-a716-446655440000.item",
+			want:   "item",
+		},
+		{
+			name:   "entity without prefix",
+			entity: "item",
+			want:   "item",
+		},
+		{
+			name:   "different app prefix",
+			entity: "other-uuid.item",
+			want:   "other-uuid.item",
+		},
+		{
+			name:   "empty entity",
+			entity: "",
+			want:   "",
+		},
+		{
+			name:   "just prefix with dot",
+			entity: "550e8400-e29b-41d4-a716-446655440000.",
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := client.stripPrefix(tt.entity)
+			if got != tt.want {
+				t.Errorf("stripPrefix(%q) = %q, want %q", tt.entity, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPrefixRoundTrip(t *testing.T) {
+	client := NewClient(SyncConfig{
+		AppID:    "550e8400-e29b-41d4-a716-446655440000",
+		BaseURL:  "http://localhost",
+		DeviceID: "test-device",
+	})
+
+	entities := []string{"item", "user", "task", "note"}
+
+	for _, entity := range entities {
+		t.Run(entity, func(t *testing.T) {
+			prefixed := client.prefixedEntity(entity)
+			stripped := client.stripPrefix(prefixed)
+
+			if stripped != entity {
+				t.Errorf("round trip failed: %q -> %q -> %q", entity, prefixed, stripped)
+			}
+		})
+	}
+}

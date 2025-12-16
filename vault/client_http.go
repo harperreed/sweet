@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,6 +41,17 @@ func NewClient(cfg SyncConfig) *Client {
 func isValidUUID(s string) bool {
 	_, err := uuid.Parse(s)
 	return err == nil
+}
+
+// prefixedEntity returns the entity name with AppID namespace prefix.
+func (c *Client) prefixedEntity(entity string) string {
+	return c.cfg.AppID + "." + entity
+}
+
+// stripPrefix removes the AppID namespace prefix from an entity name.
+func (c *Client) stripPrefix(entity string) string {
+	prefix := c.cfg.AppID + "."
+	return strings.TrimPrefix(entity, prefix)
 }
 
 // PushReq is sent by clients to upload encrypted changes.
