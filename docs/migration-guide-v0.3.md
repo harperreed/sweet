@@ -1,8 +1,18 @@
-# Migration Guide: v0.2.x to v0.3.0
+# Migration Guide: v0.2.x to v0.3.x
 
-This guide covers the breaking changes in v0.3.0 related to device validation security improvements.
+This guide covers breaking changes in the v0.3.x release series:
 
-## Overview
+- **v0.3.0**: Device validation security improvements
+- **v0.3.1**: Module path change (`suitesync` → `github.com/harperreed/sweet`)
+
+## Table of Contents
+
+- [v0.3.0: Device Validation](#v030-device-validation) - Required device registration and headers
+- [v0.3.1: Module Path Change](#v031-module-path-change) - New import path
+
+---
+
+## v0.3.0: Device Validation
 
 v0.3.0 introduces mandatory device validation based on the security audit findings. All authenticated API requests now require:
 
@@ -236,3 +246,106 @@ No server-side migration needed. Device validation is enforced at the API layer.
 ### Q: Can a device be un-revoked?
 
 No. Once revoked, that device ID is permanently blocked. Generate a new device ID and re-login.
+
+---
+
+## v0.3.1: Module Path Change
+
+v0.3.1 changes the module path from `suitesync` to `github.com/harperreed/sweet`. This enables direct `go get` without replace directives.
+
+### Breaking Changes
+
+**Before (v0.3.0 and earlier):**
+```go
+// go.mod
+require suitesync v0.3.0
+replace suitesync => github.com/harperreed/sweet v0.3.0
+
+// imports
+import "suitesync/vault"
+```
+
+**After (v0.3.1+):**
+```go
+// go.mod
+require github.com/harperreed/sweet v0.3.1
+// No replace directive needed!
+
+// imports
+import "github.com/harperreed/sweet/vault"
+```
+
+### Migration Steps
+
+#### Step 1: Update go.mod
+
+Remove any `suitesync` require and replace directives:
+
+```bash
+# Remove old dependency
+go mod edit -droprequire suitesync
+go mod edit -dropreplace suitesync
+
+# Add new dependency
+go get github.com/harperreed/sweet@v0.3.1
+```
+
+#### Step 2: Update All Imports
+
+Update imports in all `.go` files:
+
+| Old Import | New Import |
+|------------|------------|
+| `suitesync/vault` | `github.com/harperreed/sweet/vault` |
+| `suitesync/sync` | `github.com/harperreed/sweet/sync` |
+
+**Using sed:**
+```bash
+# macOS
+find . -name '*.go' -exec sed -i '' 's|"suitesync/|"github.com/harperreed/sweet/|g' {} +
+
+# Linux
+find . -name '*.go' -exec sed -i 's|"suitesync/|"github.com/harperreed/sweet/|g' {} +
+```
+
+**Using ast-grep (recommended):**
+```bash
+sg --pattern '"suitesync/$PKG"' --rewrite '"github.com/harperreed/sweet/$PKG"' --lang go
+```
+
+#### Step 3: Tidy and Verify
+
+```bash
+go mod tidy
+go build ./...
+go test ./...
+```
+
+### Prompt for AI Agents
+
+If you're using AI coding assistants to update your repos, use this prompt:
+
+```
+The `suitesync` module has moved to `github.com/harperreed/sweet`. Update this project:
+
+1. In go.mod:
+   - Change `require suitesync ...` to `require github.com/harperreed/sweet v0.3.1`
+   - REMOVE any `replace suitesync => ...` directive
+
+2. Update ALL imports in .go files:
+   - `suitesync/vault` → `github.com/harperreed/sweet/vault`
+   - `suitesync/sync` → `github.com/harperreed/sweet/sync`
+   - (any other suitesync/... imports)
+
+3. Run: go mod tidy && go build ./... && go test ./...
+```
+
+### Checklist
+
+- [ ] Remove `require suitesync` from go.mod
+- [ ] Remove `replace suitesync => ...` from go.mod
+- [ ] Add `require github.com/harperreed/sweet v0.3.1`
+- [ ] Update all `suitesync/...` imports to `github.com/harperreed/sweet/...`
+- [ ] Run `go mod tidy`
+- [ ] Verify build: `go build ./...`
+- [ ] Verify tests: `go test ./...`

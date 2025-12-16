@@ -11,6 +11,16 @@ The vault library provides:
 - Push/pull sync with monotonic ordering
 - PocketBase authentication
 
+## Module Path (v0.3.1+)
+
+As of v0.3.1, the module path is `github.com/harperreed/sweet`. This enables direct `go get` without replace directives:
+
+```bash
+go get github.com/harperreed/sweet@v0.3.1
+```
+
+**Upgrading from older versions?** See the [Migration Guide](./migration-guide-v0.3.md#v031-module-path-change) for import update instructions.
+
 ## Hosted Sync Server
 
 A public sync server is available at:
