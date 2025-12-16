@@ -302,15 +302,17 @@ func (s *Server) insertChanges(ctx context.Context, req pushReq) ([]string, erro
 // getNextSeqTx returns the next sequence number within a transaction.
 // This ensures atomic read-and-increment to prevent race conditions.
 //
-//nolint:unparam // Error return kept for API consistency; may be used in future.
+// Returns an error if the database query fails. Only returns 1 when
+// the query succeeds and finds no existing records for the user.
 func getNextSeqTx(txApp core.App, changesCol *core.Collection, userID string) (int64, error) {
 	// Find max seq for this user
 	records, err := txApp.FindRecordsByFilter(changesCol, "user_id = {:user_id}", "-seq", 1, 0, map[string]any{"user_id": userID})
 	if err != nil {
-		// If query fails, start at 1 (safe default for new users)
-		return 1, nil //nolint:nilerr // Starting at seq 1 is safe even on query error.
+		// Database error - propagate it (connection failure, lock timeout, etc.)
+		return 0, err
 	}
 	if len(records) == 0 {
+		// Query succeeded but no records exist - new user starts at seq 1
 		return 1, nil
 	}
 	return int64(records[0].GetInt("seq")) + 1, nil
