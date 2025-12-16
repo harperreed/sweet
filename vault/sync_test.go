@@ -370,3 +370,41 @@ func TestSyncEvents_NilEvents(t *testing.T) {
 		t.Fatalf("sync with nil events: %v", err)
 	}
 }
+
+func TestSyncerPushFlowPrefixesEntities(t *testing.T) {
+	env := newSyncTestEnv(t)
+
+	// Create syncer
+	syncer := NewSyncer(env.store, env.client, env.keys, env.userID)
+
+	// Queue changes using syncer (entities will be prefixed)
+	err := syncer.QueueChange(env.ctx, "todo", "task-1", OpUpsert, map[string]any{"text": "prefixed"})
+	if err != nil {
+		t.Fatalf("queue change: %v", err)
+	}
+
+	// Sync should push the change
+	applied := []Change{}
+	err = Sync(env.ctx, env.store, env.client, env.keys, env.userID, func(ctx context.Context, c Change) error {
+		applied = append(applied, c)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	// Verify the change was pushed
+	if env.fake.pushedCount() != 1 {
+		t.Fatalf("expected 1 pushed, got %d", env.fake.pushedCount())
+	}
+
+	// Verify the pushed entity includes the prefix
+	env.fake.mu.Lock()
+	pushedEntity := env.fake.pushed[0].Entity
+	env.fake.mu.Unlock()
+
+	expectedEntity := "550e8400-e29b-41d4-a716-446655440000.todo"
+	if pushedEntity != expectedEntity {
+		t.Errorf("expected pushed entity=%q, got %q", expectedEntity, pushedEntity)
+	}
+}

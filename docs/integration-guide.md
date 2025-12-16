@@ -11,25 +11,42 @@ The vault library provides:
 - Push/pull sync with monotonic ordering
 - PocketBase authentication
 
+## Hosted Sync Server
+
+A public sync server is available at:
+
+```
+https://api.storeusa.org
+```
+
+This is a PocketBase instance with the sync API endpoints. You can:
+- Register new accounts via the API
+- Use it immediately for development and production
+- Self-host your own instance if preferred (see [syncvaultd](https://github.com/harperreed/syncvaultd))
+
+No setup required - just point your app at `https://api.storeusa.org` and start syncing.
+
 ## Quick Start
 
 ### 1. Add the Dependency
 
-```bash
-# If using the github module directly
-go get github.com/harperreed/sweet
-
-# Or with a replace directive for local development
-```
+The module is hosted on GitHub but declares itself as `suitesync`, so a replace directive is required:
 
 In `go.mod`:
 ```go
 require (
-    suitesync v0.1.3
+    suitesync v0.2.7
 )
 
-replace suitesync => github.com/harperreed/sweet v0.1.3
+replace suitesync => github.com/harperreed/sweet v0.2.7
 ```
+
+Then run:
+```bash
+go mod tidy
+```
+
+**Note:** The replace directive means `go mod verify` will fail. Either disable that hook or use `SKIP=go-mod-verify` in pre-commit.
 
 ### 2. Create Your Sync Config
 
