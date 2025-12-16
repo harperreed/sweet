@@ -101,8 +101,8 @@ func (s *Server) handlePBRegister(w http.ResponseWriter, r *http.Request) {
 
 	expires := time.Now().Add(24 * time.Hour)
 
-	// Log verification token for development (in production, send email)
-	if verificationToken != "" {
+	// Log verification token only in dev mode (in production, send email)
+	if verificationToken != "" && os.Getenv("DEV_MODE") == "1" {
 		log.Printf("Verification token for %s: %s", req.Email, verificationToken)
 	}
 
