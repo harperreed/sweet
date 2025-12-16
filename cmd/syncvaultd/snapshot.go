@@ -164,3 +164,48 @@ func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
 
 	ok(w, map[string]any{"ok": true, "deleted_changes": deleted})
 }
+
+func (s *Server) handleWipe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		fail(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	authUser := r.Context().Value(ctxUserIDKey{}).(string)
+
+	// Delete all sync_changes for this user
+	changesCol, err := s.app.FindCollectionByNameOrId("sync_changes")
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "collection not found")
+		return
+	}
+
+	toDelete, err := s.app.FindRecordsByFilter(changesCol,
+		"user_id = {:user_id}", "", 10000, 0,
+		map[string]any{"user_id": authUser})
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	var deleted int
+	for _, rec := range toDelete {
+		if err := s.app.Delete(rec); err == nil {
+			deleted++
+		}
+	}
+
+	// Also delete any snapshots for this user
+	snapshotsCol, err := s.app.FindCollectionByNameOrId("sync_snapshots")
+	if err == nil {
+		snapshots, err := s.app.FindRecordsByFilter(snapshotsCol,
+			"user_id = {:user_id}", "", 1000, 0,
+			map[string]any{"user_id": authUser})
+		if err == nil {
+			for _, rec := range snapshots {
+				_ = s.app.Delete(rec)
+			}
+		}
+	}
+
+	ok(w, map[string]any{"deleted": deleted})
+}

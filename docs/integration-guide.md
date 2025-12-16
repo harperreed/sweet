@@ -509,6 +509,113 @@ The vault library is flexible - it doesn't care which identifier you use. Just b
 
 Both `keys.UserID()` (vault-derived) and PocketBase record IDs work fine. Pick one.
 
+### Migrating After UserID Change (Mixed Data)
+
+If you've already synced data with one userID strategy and need to switch, you have two options:
+
+**Option A: Fresh Start** (recommended for dev/test)
+```bash
+# 1. Clear server-side data (requires admin access)
+#    In PocketBase admin: delete records from sync_changes where user = 'YOUR_USER_ID'
+
+# 2. Clear local vault database
+rm ~/.config/yourapp/vault.db
+
+# 3. Sync fresh with new AAD strategy
+yourapp sync now
+```
+
+**Option B: Client-Side Re-encryption** (preserves history)
+```go
+// Pull with OLD AAD, re-encrypt with NEW AAD, push with same ChangeID
+oldUserID := keys.UserID()
+newUserID := config.UserID
+
+items, _ := client.Pull(ctx, serverUserID, 0)
+for _, item := range items {
+    // Decrypt with old AAD
+    oldAAD := []byte("v1|" + oldUserID + "|" + item.DeviceID + "|" + item.ChangeID + "|" + item.Entity)
+    plaintext, _ := vault.Decrypt(keys.EncKey, item.Env, oldAAD)
+
+    // Re-encrypt with new AAD
+    newAAD := []byte("v1|" + newUserID + "|" + item.DeviceID + "|" + item.ChangeID + "|" + item.Entity)
+    newEnv, _ := vault.Encrypt(keys.EncKey, plaintext, newAAD)
+
+    // Push with same ChangeID (idempotent update)
+    client.Push(ctx, serverUserID, []vault.PushItem{{
+        ChangeID: item.ChangeID,
+        Entity:   item.Entity,
+        Env:      newEnv,
+        // ...
+    }})
+}
+```
+
+## Self-Service Data Wipe
+
+If sync becomes corrupted (AAD mismatch, data migration issues, or development testing), users can wipe their server-side data and resync:
+
+### Using the Wipe Endpoint
+
+```go
+// POST /v1/sync/wipe (requires auth)
+// Deletes ALL sync data for the authenticated user
+resp, err := http.Post(server+"/v1/sync/wipe", "application/json", nil)
+```
+
+### Wipe and Resync Flow
+
+```bash
+# 1. Wipe server data via API (or add a CLI command)
+curl -X POST -H "Authorization: Bearer $TOKEN" $SERVER/v1/sync/wipe
+
+# 2. Clear local vault database
+rm ~/.config/yourapp/vault.db
+
+# 3. Re-push local data
+yourapp sync now
+```
+
+### Understanding Decrypt Errors
+
+When decryption fails, the error now includes context to help diagnose the issue:
+
+```
+decrypt failed for change abc123 (entity: passwords): AAD mismatch -
+check userID/deviceID match encryption context (userID: user-xyz, deviceID: dev-456):
+chacha20poly1305: message authentication failed
+```
+
+**What this means:**
+- `change abc123` - The specific change ID that failed
+- `entity: passwords` - The entity type
+- `userID/deviceID` - The values used during decryption
+
+**Common causes:**
+1. **UserID mismatch** - Data encrypted with different userID than used for sync
+2. **Wrong encryption key** - Different seed phrase on different devices
+3. **Data corruption** - Rare, but possible with storage issues
+
+**Programmatic handling:**
+```go
+import "errors"
+
+err := syncer.Sync(ctx)
+if err != nil {
+    var decErr *vault.DecryptError
+    if errors.As(err, &decErr) {
+        log.Printf("Decrypt failed for change %s (entity: %s)",
+            decErr.ChangeID, decErr.Entity)
+        log.Printf("This usually means AAD mismatch - consider wipe-and-resync")
+    }
+
+    if errors.Is(err, vault.ErrDecryptFailed) {
+        // Handle any decrypt failure generically
+        offerWipeOption()
+    }
+}
+```
+
 ## Troubleshooting
 
 ### "derived key not configured"
@@ -526,3 +633,19 @@ This is expected. Use `SKIP=go-mod-verify` in pre-commit hooks or remove the ver
 The mnemonic must be either:
 - 24 BIP39 words separated by spaces
 - 64-character hex string
+
+### Resetting sync completely
+To start fresh (useful during development):
+
+```bash
+# 1. Clear local vault database
+rm ~/.config/yourapp/vault.db
+
+# 2. Clear server-side data (requires PocketBase admin access)
+#    Delete from sync_changes where user = 'YOUR_USER_ID'
+
+# 3. Re-sync
+yourapp sync now
+```
+
+Your local app data remains intact - only the sync state is reset.

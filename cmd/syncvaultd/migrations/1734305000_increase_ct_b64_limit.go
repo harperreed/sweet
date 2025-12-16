@@ -11,9 +11,10 @@ import (
 func init() {
 	m.Register(func(app core.App) error {
 		// Update sync_changes collection
+		// Skip if collection doesn't exist (fresh installs get correct limits from base migration)
 		syncChanges, err := app.FindCollectionByNameOrId("sync_changes")
 		if err != nil {
-			return err
+			return nil // Collection doesn't exist yet, skip
 		}
 
 		// Find and update the ct_b64 field

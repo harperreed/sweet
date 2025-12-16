@@ -71,7 +71,13 @@ func pullAndApply(ctx context.Context, client *Client, keys Keys, userID string,
 		aad := []byte("v1|" + userID + "|" + it.DeviceID + "|" + it.ChangeID + "|" + it.Entity)
 		plain, err := Decrypt(keys.EncKey, it.Env, aad)
 		if err != nil {
-			return pulled, maxSeq, err
+			return pulled, maxSeq, &DecryptError{
+				ChangeID: it.ChangeID,
+				Entity:   it.Entity,
+				UserID:   userID,
+				DeviceID: it.DeviceID,
+				Cause:    err,
+			}
 		}
 		var c Change
 		if err := json.Unmarshal(plain, &c); err != nil {

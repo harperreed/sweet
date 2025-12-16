@@ -76,6 +76,7 @@ func (s *Server) registerRoutes(r *router.Router[*core.RequestEvent]) {
 	r.GET("/v1/sync/pull", s.wrapHandler(s.withAuth(s.handlePull)))
 	r.POST("/v1/sync/snapshot", s.wrapHandler(s.withAuth(s.handleSnapshot)))
 	r.POST("/v1/sync/compact", s.wrapHandler(s.withAuth(s.handleCompact)))
+	r.POST("/v1/sync/wipe", s.wrapHandler(s.withAuth(s.handleWipe)))
 
 	// Device management (protected)
 	r.GET("/v1/devices", s.wrapHandler(s.withAuth(s.handleListDevices)))

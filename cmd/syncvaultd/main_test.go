@@ -248,6 +248,7 @@ func startTestServer(t *testing.T, srv *Server) *httptest.Server {
 	mux.HandleFunc("/v1/sync/pull", srv.withAuth(srv.handlePull))
 	mux.HandleFunc("/v1/sync/snapshot", srv.withAuth(srv.handleSnapshot))
 	mux.HandleFunc("/v1/sync/compact", srv.withAuth(srv.handleCompact))
+	mux.HandleFunc("/v1/sync/wipe", srv.withAuth(srv.handleWipe))
 
 	// Device management (protected)
 	mux.HandleFunc("/v1/devices", srv.withAuth(srv.handleListDevices))
@@ -1164,5 +1165,80 @@ func TestHealthEndpoint(t *testing.T) {
 	now := time.Now().Unix()
 	if body.Time < now-60 || body.Time > now+60 {
 		t.Errorf("server time %d is too far from now %d", body.Time, now)
+	}
+}
+
+func TestWipeDeletesUserData(t *testing.T) {
+	env := newServerTestEnv(t)
+
+	// Push some changes
+	env.pushChange(t, "device-a")
+	env.pushChange(t, "device-a")
+
+	// Verify we can pull them back
+	client := vault.NewClient(vault.SyncConfig{BaseURL: env.server.URL, DeviceID: "device-a", AuthToken: env.token})
+	pullResp, err := client.Pull(env.ctx, env.userID, 0)
+	if err != nil {
+		t.Fatalf("pull before wipe: %v", err)
+	}
+	if len(pullResp.Items) < 1 {
+		t.Fatalf("expected at least 1 item before wipe, got %d", len(pullResp.Items))
+	}
+
+	// Call wipe endpoint
+	req, _ := http.NewRequest("POST", env.server.URL+"/v1/sync/wipe", nil)
+	req.Header.Set("Authorization", "Bearer "+env.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("wipe request: %v", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("close body: %v", err)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("wipe expected 200, got %d", resp.StatusCode)
+	}
+
+	// Verify wipe response contains deleted count
+	var wipeResp struct {
+		Deleted int `json:"deleted"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wipeResp); err != nil {
+		t.Fatalf("decode wipe response: %v", err)
+	}
+	if wipeResp.Deleted < 1 {
+		t.Fatalf("expected at least 1 deleted, got %d", wipeResp.Deleted)
+	}
+
+	// Verify data is gone - pull should return empty
+	pullResp2, err := client.Pull(env.ctx, env.userID, 0)
+	if err != nil {
+		t.Fatalf("pull after wipe: %v", err)
+	}
+	if len(pullResp2.Items) != 0 {
+		t.Fatalf("expected 0 items after wipe, got %d", len(pullResp2.Items))
+	}
+}
+
+func TestWipeRequiresAuth(t *testing.T) {
+	env := newServerTestEnv(t)
+
+	// Call wipe without auth token
+	req, _ := http.NewRequest("POST", env.server.URL+"/v1/sync/wipe", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("wipe request: %v", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("close body: %v", err)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wipe without auth expected 401, got %d", resp.StatusCode)
 	}
 }

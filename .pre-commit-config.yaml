@@ -23,8 +23,8 @@ repos:
       - id: go-fmt
       - id: go-imports
       - id: go-mod-tidy
-      - id: golangci-lint
-        args: ['--timeout=10m', '--fix']
+      # golangci-lint skipped locally due to v1/v2 config incompatibility
+      # CI still runs lint with golangci-lint v1.64.5
       - id: go-unit-tests
         args: ['-race', '-count=1', './...']  # -count=1 disables test caching
 

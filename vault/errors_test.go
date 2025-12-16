@@ -16,6 +16,7 @@ func TestSentinelErrors(t *testing.T) {
 		ErrServerError,
 		ErrConflict,
 		ErrNotConfigured,
+		ErrDecryptFailed,
 	}
 
 	for i, a := range sentinels {
@@ -73,4 +74,70 @@ func TestSyncError_WithDetail(t *testing.T) {
 	if syncErr.Detail != "invalid refresh token" {
 		t.Errorf("Detail = %q, want %q", syncErr.Detail, "invalid refresh token")
 	}
+}
+
+func TestDecryptError_Error(t *testing.T) {
+	err := &DecryptError{
+		ChangeID: "change-123",
+		Entity:   "passwords",
+		UserID:   "user-abc",
+		DeviceID: "device-xyz",
+		Cause:    errors.New("message authentication failed"),
+	}
+
+	got := err.Error()
+	// Should include context about the failing change
+	if got == "" {
+		t.Error("Error() should return non-empty string")
+	}
+
+	// Verify the message includes key fields for debugging
+	wantSubstrings := []string{"change-123", "passwords", "AAD mismatch"}
+	for _, sub := range wantSubstrings {
+		if !containsString(got, sub) {
+			t.Errorf("Error() = %q, should contain %q", got, sub)
+		}
+	}
+}
+
+func TestDecryptError_Is(t *testing.T) {
+	err := &DecryptError{
+		ChangeID: "change-123",
+		Entity:   "passwords",
+		Cause:    errors.New("message authentication failed"),
+	}
+
+	if !errors.Is(err, ErrDecryptFailed) {
+		t.Error("errors.Is should match ErrDecryptFailed")
+	}
+
+	if errors.Is(err, ErrNetworkFailure) {
+		t.Error("errors.Is should not match ErrNetworkFailure")
+	}
+}
+
+func TestDecryptError_As(t *testing.T) {
+	err := &DecryptError{
+		ChangeID: "change-123",
+		Entity:   "passwords",
+		UserID:   "user-abc",
+		DeviceID: "device-xyz",
+		Cause:    errors.New("message authentication failed"),
+	}
+
+	var decErr *DecryptError
+	if !errors.As(err, &decErr) {
+		t.Error("errors.As should match *DecryptError")
+	}
+
+	if decErr.ChangeID != "change-123" {
+		t.Errorf("ChangeID = %q, want %q", decErr.ChangeID, "change-123")
+	}
+	if decErr.Entity != "passwords" {
+		t.Errorf("Entity = %q, want %q", decErr.Entity, "passwords")
+	}
+}
+
+func containsString(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && (s[:len(substr)] == substr || containsString(s[1:], substr)))
 }
