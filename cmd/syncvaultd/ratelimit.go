@@ -6,6 +6,7 @@ package main
 import (
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -89,27 +90,32 @@ func (s *rateLimiterStore) setConfig(interval time.Duration, burst int) {
 	s.limiters = make(map[string]*rate.Limiter)
 }
 
-// getClientIP extracts client IP from request, handling X-Forwarded-For header.
+// getClientIP extracts client IP from request.
+// Only trusts X-Forwarded-For/X-Real-IP headers when TRUSTED_PROXY=1 env var is set.
+// Otherwise uses RemoteAddr to prevent header spoofing attacks.
 func getClientIP(r *http.Request) string {
-	// Check X-Forwarded-For header (first IP in chain is the client)
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the first IP in the list
-		if idx := len(xff); idx > 0 {
-			for i, c := range xff {
-				if c == ',' {
-					return xff[:i]
+	// Only trust proxy headers if explicitly configured
+	if os.Getenv("TRUSTED_PROXY") == "1" {
+		// Check X-Forwarded-For header (first IP in chain is the client)
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			// Take the first IP in the list
+			if idx := len(xff); idx > 0 {
+				for i, c := range xff {
+					if c == ',' {
+						return xff[:i]
+					}
 				}
+				return xff
 			}
-			return xff
+		}
+
+		// Check X-Real-IP header
+		if xri := r.Header.Get("X-Real-IP"); xri != "" {
+			return xri
 		}
 	}
 
-	// Check X-Real-IP header
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
-	}
-
-	// Fall back to RemoteAddr
+	// Use RemoteAddr (direct connection IP)
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
