@@ -202,16 +202,30 @@ func kvDelete(args []string) error {
 }
 
 func kvSync(args []string) error {
-	cfg, err := loadRuntimeConfig(args)
+	// Check for verbose flag before parsing other flags
+	verbose := false
+	filteredArgs := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "-v" || arg == "--verbose" {
+			verbose = true
+		} else {
+			filteredArgs = append(filteredArgs, arg)
+		}
+	}
+
+	cfg, err := loadRuntimeConfig(filteredArgs)
 	if err != nil {
 		return err
 	}
 
 	return runKVApp(cfg.runtime, func(ctx context.Context, app *appcli.App) error {
-		if err := app.Sync(ctx); err != nil {
+		opts := appcli.SyncOptions{Verbose: verbose}
+		if err := app.SyncWithOptions(ctx, opts); err != nil {
 			return err
 		}
-		fmt.Println("Sync complete")
+		if !verbose {
+			fmt.Println("Sync complete")
+		}
 		return nil
 	})
 }

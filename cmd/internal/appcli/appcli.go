@@ -117,10 +117,21 @@ func (a *App) Delete(ctx context.Context, entityID string) error {
 	return a.queueChange(ctx, entityID, vault.OpDelete, nil)
 }
 
+// SyncOptions configures sync behavior.
+type SyncOptions struct {
+	Verbose bool                             // Print progress messages
+	OnLog   func(format string, args ...any) // Custom log function (defaults to fmt.Printf)
+}
+
 // Sync pushes pending changes and pulls remote ones.
 // It first performs a catch-up sync to queue any local records that were
 // created before sync was configured.
 func (a *App) Sync(ctx context.Context) error {
+	return a.SyncWithOptions(ctx, SyncOptions{})
+}
+
+// SyncWithOptions syncs with configurable options.
+func (a *App) SyncWithOptions(ctx context.Context, opts SyncOptions) error {
 	if a.opts.ServerURL == "" || a.opts.AuthToken == "" {
 		return errors.New("server url and auth token required for sync")
 	}
@@ -128,36 +139,69 @@ func (a *App) Sync(ctx context.Context) error {
 		return errors.New("user id required for sync")
 	}
 
-	// Catch-up: queue any local records not already pending
-	if err := a.catchUpLocalRecords(ctx); err != nil {
-		return fmt.Errorf("catch-up sync: %w", err)
+	log := opts.OnLog
+	if log == nil {
+		log = func(format string, args ...any) {
+			if opts.Verbose {
+				fmt.Printf(format, args...)
+			}
+		}
 	}
 
-	return vault.Sync(ctx, a.store, a.client, a.keys, a.opts.UserID, a.ApplyChange)
+	// Catch-up: queue any local records not already pending
+	catchUpCount, err := a.catchUpLocalRecords(ctx, log)
+	if err != nil {
+		return fmt.Errorf("catch-up sync: %w", err)
+	}
+	if catchUpCount > 0 {
+		log("Queued %d local record(s) for sync\n", catchUpCount)
+	}
+
+	var events *vault.SyncEvents
+	if opts.Verbose {
+		events = &vault.SyncEvents{
+			OnStart: func() {
+				log("Starting sync...\n")
+			},
+			OnPush: func(pushed, remaining int) {
+				log("Pushed %d change(s), %d remaining\n", pushed, remaining)
+			},
+			OnPull: func(pulled int) {
+				log("Pulled %d change(s)\n", pulled)
+			},
+			OnComplete: func(pushed, pulled int) {
+				log("Sync complete: pushed %d, pulled %d\n", pushed, pulled)
+			},
+		}
+	}
+
+	return vault.Sync(ctx, a.store, a.client, a.keys, a.opts.UserID, a.ApplyChange, events)
 }
 
 // catchUpLocalRecords scans app.db for records that aren't queued in the vault
 // outbox and queues them. This handles records created before login/sync was configured.
-func (a *App) catchUpLocalRecords(ctx context.Context) error {
+// Returns the number of records queued.
+func (a *App) catchUpLocalRecords(ctx context.Context, log func(string, ...any)) (int, error) {
 	rows, err := a.appDB.QueryContext(ctx,
 		`SELECT entity_id, payload, op FROM records WHERE entity = ?`, a.opts.Entity)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer func() { _ = rows.Close() }()
 
 	prefixedEntity := a.client.PrefixedEntity(a.opts.Entity)
+	queued := 0
 
 	for rows.Next() {
 		var entityID, payloadStr, opStr string
 		if err := rows.Scan(&entityID, &payloadStr, &opStr); err != nil {
-			return err
+			return queued, err
 		}
 
 		// Check if already in outbox
 		hasPending, err := a.store.HasPendingForEntity(ctx, prefixedEntity, entityID)
 		if err != nil {
-			return err
+			return queued, err
 		}
 		if hasPending {
 			continue // Already queued
@@ -167,7 +211,7 @@ func (a *App) catchUpLocalRecords(ctx context.Context) error {
 		var payload map[string]any
 		if payloadStr != "" {
 			if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil {
-				return fmt.Errorf("unmarshal payload for %s: %w", entityID, err)
+				return queued, fmt.Errorf("unmarshal payload for %s: %w", entityID, err)
 			}
 		}
 
@@ -177,12 +221,15 @@ func (a *App) catchUpLocalRecords(ctx context.Context) error {
 			continue
 		}
 
+		log("Catch-up: queueing %s\n", entityID)
+
 		// Queue the record for sync
 		if err := a.queueExistingRecord(ctx, entityID, op, payload); err != nil {
-			return fmt.Errorf("queue %s: %w", entityID, err)
+			return queued, fmt.Errorf("queue %s: %w", entityID, err)
 		}
+		queued++
 	}
-	return rows.Err()
+	return queued, rows.Err()
 }
 
 // queueExistingRecord queues an existing local record for sync without re-applying locally.
