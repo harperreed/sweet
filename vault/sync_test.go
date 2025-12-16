@@ -128,7 +128,9 @@ func (e *syncTestEnv) syncExpectPush(t *testing.T) {
 }
 
 func (e *syncTestEnv) prepareRemoteChange(t *testing.T, entity, id string, payload map[string]any) {
-	change, err := NewChange(entity, id, OpUpsert, payload)
+	// Prefix entity with AppID for namespace isolation
+	prefixedEntity := e.client.prefixedEntity(entity)
+	change, err := NewChange(prefixedEntity, id, OpUpsert, payload)
 	if err != nil {
 		t.Fatalf("remote change: %v", err)
 	}
@@ -378,7 +380,7 @@ func TestSyncerPushFlowPrefixesEntities(t *testing.T) {
 	syncer := NewSyncer(env.store, env.client, env.keys, env.userID)
 
 	// Queue changes using syncer (entities will be prefixed)
-	err := syncer.QueueChange(env.ctx, "todo", "task-1", OpUpsert, map[string]any{"text": "prefixed"})
+	_, err := syncer.QueueChange(env.ctx, "todo", "task-1", OpUpsert, map[string]any{"text": "prefixed"})
 	if err != nil {
 		t.Fatalf("queue change: %v", err)
 	}
@@ -406,5 +408,113 @@ func TestSyncerPushFlowPrefixesEntities(t *testing.T) {
 	expectedEntity := "550e8400-e29b-41d4-a716-446655440000.todo"
 	if pushedEntity != expectedEntity {
 		t.Errorf("expected pushed entity=%q, got %q", expectedEntity, pushedEntity)
+	}
+}
+
+func TestPullFlowFiltersAndStripsPrefix(t *testing.T) {
+	env := newSyncTestEnv(t)
+	ourAppID := "550e8400-e29b-41d4-a716-446655440000"
+	otherAppID := "660e8400-e29b-41d4-a716-446655440000"
+
+	// Prepare remote changes:
+	// 1. Our app's change (should be applied with prefix stripped)
+	ourChange, err := NewChange(ourAppID+".todo", "our-task", OpUpsert, map[string]any{"text": "ours"})
+	if err != nil {
+		t.Fatalf("our change: %v", err)
+	}
+	ourPlain, _ := json.Marshal(ourChange)
+	ourEnv, _ := Encrypt(env.keys.EncKey, ourPlain, ourChange.AAD(env.userID, "dev-b"))
+
+	// 2. Other app's change (should be skipped)
+	otherChange, err := NewChange(otherAppID+".todo", "other-task", OpUpsert, map[string]any{"text": "theirs"})
+	if err != nil {
+		t.Fatalf("other change: %v", err)
+	}
+	otherPlain, _ := json.Marshal(otherChange)
+	otherEnv, _ := Encrypt(env.keys.EncKey, otherPlain, otherChange.AAD(env.userID, "dev-c"))
+
+	// 3. Unprefixed change (should be skipped)
+	unprefixedChange, err := NewChange("legacy", "old-task", OpUpsert, map[string]any{"text": "legacy"})
+	if err != nil {
+		t.Fatalf("unprefixed change: %v", err)
+	}
+	unprefixedPlain, _ := json.Marshal(unprefixedChange)
+	unprefixedEnv, _ := Encrypt(env.keys.EncKey, unprefixedPlain, unprefixedChange.AAD(env.userID, "dev-d"))
+
+	// Set all three items in pull response
+	env.fake.setPull([]PullItem{
+		{Seq: 1, ChangeID: ourChange.ChangeID, DeviceID: "dev-b", Entity: ourChange.Entity, Env: ourEnv},
+		{Seq: 2, ChangeID: otherChange.ChangeID, DeviceID: "dev-c", Entity: otherChange.Entity, Env: otherEnv},
+		{Seq: 3, ChangeID: unprefixedChange.ChangeID, DeviceID: "dev-d", Entity: unprefixedChange.Entity, Env: unprefixedEnv},
+	})
+
+	// Sync and collect applied changes
+	applied := []Change{}
+	err = Sync(env.ctx, env.store, env.client, env.keys, env.userID, func(ctx context.Context, c Change) error {
+		applied = append(applied, c)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	// Verify only our app's change was applied
+	if len(applied) != 1 {
+		t.Fatalf("expected 1 applied change, got %d", len(applied))
+	}
+
+	// Verify the entity prefix was stripped
+	if applied[0].Entity != "todo" {
+		t.Errorf("expected entity=todo (prefix stripped), got %q", applied[0].Entity)
+	}
+	if applied[0].EntityID != "our-task" {
+		t.Errorf("expected entityID=our-task, got %q", applied[0].EntityID)
+	}
+
+	// Verify last_pulled_seq was updated to highest seq (3), even though we skipped items
+	seq, err := env.store.GetState(env.ctx, "last_pulled_seq", "")
+	if err != nil {
+		t.Fatalf("get last_pulled_seq: %v", err)
+	}
+	if seq != "3" {
+		t.Errorf("expected last_pulled_seq=3, got %q", seq)
+	}
+}
+
+func TestPullFlowStripsPrefix(t *testing.T) {
+	env := newSyncTestEnv(t)
+	appID := "550e8400-e29b-41d4-a716-446655440000"
+
+	// Prepare remote change with prefixed entity
+	prefixedEntity := appID + ".item"
+	change, err := NewChange(prefixedEntity, "item-1", OpUpsert, map[string]any{"data": "test"})
+	if err != nil {
+		t.Fatalf("new change: %v", err)
+	}
+	plain, _ := json.Marshal(change)
+	remoteDevice := "dev-b"
+	envelope, _ := Encrypt(env.keys.EncKey, plain, change.AAD(env.userID, remoteDevice))
+
+	env.fake.setPull([]PullItem{{
+		Seq:      1,
+		ChangeID: change.ChangeID,
+		DeviceID: remoteDevice,
+		Entity:   change.Entity,
+		Env:      envelope,
+	}})
+
+	// Sync and capture applied change
+	var appliedEntity string
+	err = Sync(env.ctx, env.store, env.client, env.keys, env.userID, func(ctx context.Context, c Change) error {
+		appliedEntity = c.Entity
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	// Verify prefix was stripped
+	if appliedEntity != "item" {
+		t.Errorf("expected entity=item (prefix stripped), got %q", appliedEntity)
 	}
 }

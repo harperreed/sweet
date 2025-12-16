@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -331,28 +332,24 @@ func (e *serverTestEnv) pushChange(t *testing.T, deviceID string) vault.Change {
 	store := openTestStore(t, filepath.Join(e.dir, deviceID+".sqlite"))
 	defer closeTestStore(t, store)
 
-	change, err := vault.NewChange("todo", "todo-1", vault.OpUpsert, map[string]any{"text": "integration"})
-	if err != nil {
-		t.Fatalf("new change: %v", err)
-	}
-	changeBytes, err := json.Marshal(change)
-	if err != nil {
-		t.Fatalf("marshal change: %v", err)
-	}
-	env, err := vault.Encrypt(e.keys.EncKey, changeBytes, change.AAD(e.userID, deviceID))
-	if err != nil {
-		t.Fatalf("encrypt: %v", err)
-	}
-	if err := store.EnqueueEncryptedChange(e.ctx, change, e.userID, deviceID, env); err != nil {
-		t.Fatalf("enqueue: %v", err)
-	}
-
 	client := vault.NewClient(vault.SyncConfig{
 		AppID:     "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:   e.server.URL,
 		DeviceID:  deviceID,
 		AuthToken: e.token,
 	})
+
+	// Use Syncer to properly prefix the entity
+	syncer := vault.NewSyncer(store, client, e.keys, e.userID)
+	prefixedChange, err := syncer.QueueChange(e.ctx, "todo", "todo-1", vault.OpUpsert, map[string]any{"text": "integration"})
+	if err != nil {
+		t.Fatalf("queue change: %v", err)
+	}
+
+	// Strip the prefix to return what the app sees (manually since stripPrefix is unexported)
+	change := prefixedChange
+	change.Entity = strings.TrimPrefix(change.Entity, "550e8400-e29b-41d4-a716-446655440000.")
+
 	var applied []vault.Change
 	if err := vault.Sync(e.ctx, store, client, e.keys, e.userID, func(ctx context.Context, c vault.Change) error {
 		applied = append(applied, c)
@@ -360,8 +357,9 @@ func (e *serverTestEnv) pushChange(t *testing.T, deviceID string) vault.Change {
 	}); err != nil {
 		t.Fatalf("sync push: %v", err)
 	}
+	// The push device gets its own change back during pull (server broadcasts it)
 	if len(applied) != 1 {
-		t.Fatalf("expected 1 applied change on push device, got %d", len(applied))
+		t.Fatalf("expected 1 applied change on push device (own change echoed back), got %d", len(applied))
 	}
 	if items, err := store.DequeueBatch(e.ctx, 10); err != nil {
 		t.Fatalf("dequeue after push: %v", err)

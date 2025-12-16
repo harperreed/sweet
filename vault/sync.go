@@ -68,6 +68,15 @@ func pullAndApply(ctx context.Context, client *Client, keys Keys, userID string,
 	maxSeq := since
 	pulled := 0
 	for _, it := range pull.Items {
+		// Filter: only process items from our app namespace
+		if !client.hasAppPrefix(it.Entity) {
+			// Update maxSeq but don't count as pulled
+			if it.Seq > maxSeq {
+				maxSeq = it.Seq
+			}
+			continue
+		}
+
 		aad := []byte("v1|" + userID + "|" + it.DeviceID + "|" + it.ChangeID + "|" + it.Entity)
 		plain, err := Decrypt(keys.EncKey, it.Env, aad)
 		if err != nil {
@@ -83,6 +92,8 @@ func pullAndApply(ctx context.Context, client *Client, keys Keys, userID string,
 		if err := json.Unmarshal(plain, &c); err != nil {
 			return pulled, maxSeq, err
 		}
+		// Strip prefix before passing to apply callback
+		c.Entity = client.stripPrefix(c.Entity)
 		if err := apply(ctx, c); err != nil {
 			return pulled, maxSeq, err
 		}

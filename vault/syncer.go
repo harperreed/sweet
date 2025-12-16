@@ -27,19 +27,20 @@ func NewSyncer(store *Store, client *Client, keys Keys, userID string) *Syncer {
 
 // QueueChange creates, encrypts, and queues a change for push.
 // Entity is automatically prefixed with AppID for namespace isolation.
-func (s *Syncer) QueueChange(ctx context.Context, entity, entityID string, op Op, payload any) error {
+// Returns the Change with prefixed entity name.
+func (s *Syncer) QueueChange(ctx context.Context, entity, entityID string, op Op, payload any) (Change, error) {
 	// Prefix entity with AppID before creating change
 	prefixedEntity := s.client.prefixedEntity(entity)
 
 	change, err := NewChange(prefixedEntity, entityID, op, payload)
 	if err != nil {
-		return err
+		return Change{}, err
 	}
 
 	// Serialize change to plaintext
 	plain, err := json.Marshal(change)
 	if err != nil {
-		return err
+		return Change{}, err
 	}
 
 	// Generate AAD with prefixed entity (already in change.Entity)
@@ -48,9 +49,13 @@ func (s *Syncer) QueueChange(ctx context.Context, entity, entityID string, op Op
 	// Encrypt with AAD binding
 	env, err := Encrypt(s.keys.EncKey, plain, aad)
 	if err != nil {
-		return err
+		return Change{}, err
 	}
 
 	// Enqueue encrypted change
-	return s.store.EnqueueEncryptedChange(ctx, change, s.userID, s.client.cfg.DeviceID, env)
+	if err := s.store.EnqueueEncryptedChange(ctx, change, s.userID, s.client.cfg.DeviceID, env); err != nil {
+		return Change{}, err
+	}
+
+	return change, nil
 }

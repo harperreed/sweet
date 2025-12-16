@@ -54,6 +54,12 @@ func (c *Client) stripPrefix(entity string) string {
 	return strings.TrimPrefix(entity, prefix)
 }
 
+// hasAppPrefix checks if an entity name has our AppID namespace prefix.
+func (c *Client) hasAppPrefix(entity string) bool {
+	prefix := c.cfg.AppID + "."
+	return strings.HasPrefix(entity, prefix)
+}
+
 // PushReq is sent by clients to upload encrypted changes.
 type PushReq struct {
 	UserID   string     `json:"user_id"`

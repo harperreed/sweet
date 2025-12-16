@@ -46,7 +46,7 @@ func TestSyncerQueueChangePrefixesEntity(t *testing.T) {
 	entityID := "task-1"
 	payload := map[string]any{"text": "buy milk"}
 
-	err = syncer.QueueChange(ctx, entity, entityID, OpUpsert, payload)
+	_, err = syncer.QueueChange(ctx, entity, entityID, OpUpsert, payload)
 	if err != nil {
 		t.Fatalf("queue change: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestSyncerQueueChangeIncludesPrefixInAAD(t *testing.T) {
 	syncer := NewSyncer(store, client, keys, keys.UserID())
 
 	// Queue change
-	err = syncer.QueueChange(ctx, "item", "id-1", OpUpsert, map[string]any{"value": 42})
+	_, err = syncer.QueueChange(ctx, "item", "id-1", OpUpsert, map[string]any{"value": 42})
 	if err != nil {
 		t.Fatalf("queue: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestSyncerQueueChangeMultipleEntities(t *testing.T) {
 	// Queue multiple different entity types
 	entities := []string{"todo", "note", "bookmark", "tag"}
 	for i, entity := range entities {
-		err = syncer.QueueChange(ctx, entity, entity+"-"+string(rune('0'+i)), OpUpsert, map[string]any{"n": i})
+		_, err = syncer.QueueChange(ctx, entity, entity+"-"+string(rune('0'+i)), OpUpsert, map[string]any{"n": i})
 		if err != nil {
 			t.Fatalf("queue %s: %v", entity, err)
 		}
