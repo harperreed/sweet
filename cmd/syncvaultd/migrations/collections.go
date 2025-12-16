@@ -78,10 +78,12 @@ func init() {
 			&core.TextField{
 				Name:     "nonce_b64",
 				Required: true,
+				Max:      100, // Nonces are small fixed size
 			},
 			&core.TextField{
 				Name:     "ct_b64",
 				Required: true,
+				Max:      1000000, // 1MB to support large encrypted payloads
 			},
 		)
 		syncChanges.AddIndex("idx_sync_changes_user_change", true, "user_id, change_id", "")
@@ -112,10 +114,12 @@ func init() {
 			&core.TextField{
 				Name:     "nonce_b64",
 				Required: true,
+				Max:      100, // Nonces are small fixed size
 			},
 			&core.TextField{
 				Name:     "ct_b64",
 				Required: true,
+				Max:      10000000, // 10MB for snapshots (can aggregate many changes)
 			},
 		)
 		syncSnapshots.AddIndex("idx_sync_snapshots_snapshot_id", true, "snapshot_id", "")
