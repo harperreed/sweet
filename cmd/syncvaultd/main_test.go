@@ -347,7 +347,12 @@ func (e *serverTestEnv) pushChange(t *testing.T, deviceID string) vault.Change {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	client := vault.NewClient(vault.SyncConfig{BaseURL: e.server.URL, DeviceID: deviceID, AuthToken: e.token})
+	client := vault.NewClient(vault.SyncConfig{
+		AppID:     "550e8400-e29b-41d4-a716-446655440000",
+		BaseURL:   e.server.URL,
+		DeviceID:  deviceID,
+		AuthToken: e.token,
+	})
 	var applied []vault.Change
 	if err := vault.Sync(e.ctx, store, client, e.keys, e.userID, func(ctx context.Context, c vault.Change) error {
 		applied = append(applied, c)
@@ -370,7 +375,12 @@ func (e *serverTestEnv) pullChangeOnSecondDevice(t *testing.T, deviceID, expecte
 	store := openTestStore(t, filepath.Join(e.dir, deviceID+".sqlite"))
 	defer closeTestStore(t, store)
 
-	client := vault.NewClient(vault.SyncConfig{BaseURL: e.server.URL, DeviceID: deviceID, AuthToken: e.token})
+	client := vault.NewClient(vault.SyncConfig{
+		AppID:     "550e8400-e29b-41d4-a716-446655440000",
+		BaseURL:   e.server.URL,
+		DeviceID:  deviceID,
+		AuthToken: e.token,
+	})
 	var applied []vault.Change
 	if err := vault.Sync(e.ctx, store, client, e.keys, e.userID, func(ctx context.Context, c vault.Change) error {
 		applied = append(applied, c)
@@ -745,7 +755,12 @@ func testCompaction(t *testing.T, env *serverTestEnv) {
 	pushTestChanges(t, env, 3)
 
 	// Call compact endpoint
-	client := vault.NewClient(vault.SyncConfig{BaseURL: env.server.URL, DeviceID: "device-a", AuthToken: env.token})
+	client := vault.NewClient(vault.SyncConfig{
+		AppID:     "550e8400-e29b-41d4-a716-446655440000",
+		BaseURL:   env.server.URL,
+		DeviceID:  "device-a",
+		AuthToken: env.token,
+	})
 	if err := client.Compact(env.ctx, env.userID, "todo"); err != nil {
 		t.Fatalf("compact failed: %v", err)
 	}
@@ -777,7 +792,12 @@ func testCompaction(t *testing.T, env *serverTestEnv) {
 
 func pushTestChanges(t *testing.T, env *serverTestEnv, count int) {
 	t.Helper()
-	client := vault.NewClient(vault.SyncConfig{BaseURL: env.server.URL, DeviceID: "device-a", AuthToken: env.token})
+	client := vault.NewClient(vault.SyncConfig{
+		AppID:     "550e8400-e29b-41d4-a716-446655440000",
+		BaseURL:   env.server.URL,
+		DeviceID:  "device-a",
+		AuthToken: env.token,
+	})
 	for i := 0; i < count; i++ {
 		change, err := vault.NewChange("todo", fmt.Sprintf("item-%d", i), vault.OpUpsert, map[string]any{"n": i})
 		if err != nil {
@@ -841,7 +861,12 @@ func createTestSnapshot(t *testing.T, env *serverTestEnv) {
 
 func verifySnapshotInPull(t *testing.T, env *serverTestEnv) {
 	t.Helper()
-	client := vault.NewClient(vault.SyncConfig{BaseURL: env.server.URL, DeviceID: "device-b", AuthToken: env.token})
+	client := vault.NewClient(vault.SyncConfig{
+		AppID:     "550e8400-e29b-41d4-a716-446655440000",
+		BaseURL:   env.server.URL,
+		DeviceID:  "device-b",
+		AuthToken: env.token,
+	})
 	pullResp, err := client.PullWithSnapshot(env.ctx, env.userID, 0, "todo")
 	if err != nil {
 		t.Fatalf("pull with snapshot: %v", err)
@@ -1058,6 +1083,7 @@ func TestPerItemDeviceID(t *testing.T) {
 
 	pushItems := buildPerItemDeviceIDPushItems(t, env, deviceIDs)
 	client := vault.NewClient(vault.SyncConfig{
+		AppID:     "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:   env.server.URL,
 		DeviceID:  "rotation-device",
 		AuthToken: env.token,
@@ -1176,7 +1202,12 @@ func TestWipeDeletesUserData(t *testing.T) {
 	env.pushChange(t, "device-a")
 
 	// Verify we can pull them back
-	client := vault.NewClient(vault.SyncConfig{BaseURL: env.server.URL, DeviceID: "device-a", AuthToken: env.token})
+	client := vault.NewClient(vault.SyncConfig{
+		AppID:     "550e8400-e29b-41d4-a716-446655440000",
+		BaseURL:   env.server.URL,
+		DeviceID:  "device-a",
+		AuthToken: env.token,
+	})
 	pullResp, err := client.Pull(env.ctx, env.userID, 0)
 	if err != nil {
 		t.Fatalf("pull before wipe: %v", err)

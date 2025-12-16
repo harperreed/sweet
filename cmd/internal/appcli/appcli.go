@@ -60,6 +60,7 @@ func NewApp(opts Options) (*App, error) {
 	}
 
 	client := vault.NewClient(vault.SyncConfig{
+		AppID:     "550e8400-e29b-41d4-a716-446655440000", // TODO: move to Options when implementing Task 6
 		BaseURL:   normalized.ServerURL,
 		DeviceID:  normalized.DeviceID,
 		AuthToken: normalized.AuthToken,

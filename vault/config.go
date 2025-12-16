@@ -22,6 +22,7 @@ func DefaultKDFParams() KDFParams {
 
 // SyncConfig controls outbound sync client behavior.
 type SyncConfig struct {
+	AppID        string // Required UUID for app namespace isolation
 	BaseURL      string
 	DeviceID     string
 	AuthToken    string

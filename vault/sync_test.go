@@ -65,7 +65,12 @@ func newSyncTestEnv(t *testing.T) *syncTestEnv {
 	ts := httptest.NewServer(fake.handler())
 	t.Cleanup(ts.Close)
 
-	client := NewClient(SyncConfig{BaseURL: ts.URL, DeviceID: "dev-a", AuthToken: "test-token"})
+	client := NewClient(SyncConfig{
+		AppID:     "550e8400-e29b-41d4-a716-446655440000",
+		BaseURL:   ts.URL,
+		DeviceID:  "dev-a",
+		AuthToken: "test-token",
+	})
 
 	return &syncTestEnv{
 		t:      t,
@@ -224,7 +229,12 @@ func TestPushItemPreservesPerItemDeviceID(t *testing.T) {
 	ts := httptest.NewServer(fake.handler())
 	defer ts.Close()
 
-	client := NewClient(SyncConfig{BaseURL: ts.URL, DeviceID: "rotation-device", AuthToken: "test-token"})
+	client := NewClient(SyncConfig{
+		AppID:     "550e8400-e29b-41d4-a716-446655440000",
+		BaseURL:   ts.URL,
+		DeviceID:  "rotation-device",
+		AuthToken: "test-token",
+	})
 
 	// Create changes that were originally from different devices
 	deviceIDs := []string{"device-a", "device-b", "device-c"}

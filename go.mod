@@ -5,6 +5,7 @@ go 1.24.0
 toolchain go1.24.11
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pocketbase/pocketbase v0.34.2
 	github.com/tyler-smith/go-bip39 v1.1.0
@@ -24,7 +25,6 @@ require (
 	github.com/ganigeorgiev/fexpr v0.5.0 // indirect
 	github.com/go-ozzo/ozzo-validation/v4 v4.3.0 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

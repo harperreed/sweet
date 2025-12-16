@@ -26,6 +26,7 @@ func TestClient_Health_OK(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(SyncConfig{
+		AppID:        "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:      server.URL,
 		TokenExpires: time.Now().Add(1 * time.Hour),
 	})
@@ -45,6 +46,7 @@ func TestClient_Health_OK(t *testing.T) {
 
 func TestClient_Health_ServerDown(t *testing.T) {
 	client := NewClient(SyncConfig{
+		AppID:        "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:      "http://localhost:59999", // unlikely to be listening
 		TokenExpires: time.Now().Add(1 * time.Hour),
 	})
@@ -66,6 +68,7 @@ func TestClient_Health_TokenExpired(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(SyncConfig{
+		AppID:        "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:      server.URL,
 		TokenExpires: time.Now().Add(-1 * time.Hour), // expired
 	})
@@ -82,6 +85,7 @@ func TestClient_Health_TokenExpired(t *testing.T) {
 
 func TestClient_EnsureValidToken_NotExpired(t *testing.T) {
 	client := NewClient(SyncConfig{
+		AppID:        "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:      "http://localhost",
 		TokenExpires: time.Now().Add(1 * time.Hour), // valid for 1 hour
 	})
@@ -94,6 +98,7 @@ func TestClient_EnsureValidToken_NotExpired(t *testing.T) {
 
 func TestClient_EnsureValidToken_ExpiredNoRefresh(t *testing.T) {
 	client := NewClient(SyncConfig{
+		AppID:        "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:      "http://localhost",
 		TokenExpires: time.Now().Add(-1 * time.Hour), // expired
 		RefreshToken: "",                             // no refresh token
@@ -127,6 +132,7 @@ func TestClient_EnsureValidToken_RefreshSuccess(t *testing.T) {
 	var callbackToken string
 
 	client := NewClient(SyncConfig{
+		AppID:        "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:      server.URL,
 		AuthToken:    "old-token",
 		RefreshToken: "old-refresh",
@@ -147,5 +153,72 @@ func TestClient_EnsureValidToken_RefreshSuccess(t *testing.T) {
 	}
 	if callbackToken != "new-access-token" {
 		t.Errorf("callback token = %q, want %q", callbackToken, "new-access-token")
+	}
+}
+
+func TestNewClient_EmptyAppID_Panics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Error("expected panic when AppID is empty")
+		}
+		msg, ok := r.(string)
+		if !ok {
+			t.Errorf("panic value is not a string: %v", r)
+		}
+		expected := "vault: AppID is required - generate a UUID and hardcode it"
+		if msg != expected {
+			t.Errorf("panic message = %q, want %q", msg, expected)
+		}
+	}()
+
+	NewClient(SyncConfig{
+		AppID:    "",
+		BaseURL:  "http://localhost",
+		DeviceID: "test-device",
+	})
+}
+
+func TestNewClient_InvalidUUID_Panics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Error("expected panic when AppID is invalid UUID")
+		}
+		msg, ok := r.(string)
+		if !ok {
+			t.Errorf("panic value is not a string: %v", r)
+		}
+		expected := "vault: AppID must be a valid UUID"
+		if msg != expected {
+			t.Errorf("panic message = %q, want %q", msg, expected)
+		}
+	}()
+
+	NewClient(SyncConfig{
+		AppID:    "not-a-uuid",
+		BaseURL:  "http://localhost",
+		DeviceID: "test-device",
+	})
+}
+
+func TestNewClient_ValidUUID_Works(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("unexpected panic with valid UUID: %v", r)
+		}
+	}()
+
+	client := NewClient(SyncConfig{
+		AppID:    "550e8400-e29b-41d4-a716-446655440000",
+		BaseURL:  "http://localhost",
+		DeviceID: "test-device",
+	})
+
+	if client == nil {
+		t.Error("expected client to be created")
+	}
+	if client.cfg.AppID != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Errorf("AppID = %q, want %q", client.cfg.AppID, "550e8400-e29b-41d4-a716-446655440000")
 	}
 }

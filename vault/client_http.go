@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Client performs push/pull RPCs against sync server.
@@ -17,6 +19,13 @@ type Client struct {
 
 // NewClient builds a client with optional timeout override.
 func NewClient(cfg SyncConfig) *Client {
+	if cfg.AppID == "" {
+		panic("vault: AppID is required - generate a UUID and hardcode it")
+	}
+	if !isValidUUID(cfg.AppID) {
+		panic("vault: AppID must be a valid UUID")
+	}
+
 	to := cfg.Timeout
 	if to == 0 {
 		to = 15 * time.Second
@@ -25,6 +34,12 @@ func NewClient(cfg SyncConfig) *Client {
 		cfg: cfg,
 		hc:  &http.Client{Timeout: to},
 	}
+}
+
+// isValidUUID checks if the string is a valid UUID.
+func isValidUUID(s string) bool {
+	_, err := uuid.Parse(s)
+	return err == nil
 }
 
 // PushReq is sent by clients to upload encrypted changes.
