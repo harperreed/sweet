@@ -4,6 +4,7 @@ package vault
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -139,5 +140,5 @@ func TestDecryptError_As(t *testing.T) {
 }
 
 func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && (s[:len(substr)] == substr || containsString(s[1:], substr)))
+	return strings.Contains(s, substr)
 }

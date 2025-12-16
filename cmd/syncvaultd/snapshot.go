@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 
@@ -146,23 +147,31 @@ func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Find and delete changes with seq < min_seq
-	toDelete, err := s.app.FindRecordsByFilter(changesCol,
-		"user_id = {:user_id} && entity = {:entity} && seq < {:min_seq}", "", 10000, 0,
-		map[string]any{"user_id": authUser, "entity": entity, "min_seq": snapshot.MinSeq})
-	if err != nil {
-		fail(w, http.StatusInternalServerError, "db error")
-		return
-	}
-
+	// Delete in batches to handle large datasets
 	var deleted int64
-	for _, rec := range toDelete {
-		if err := s.app.Delete(rec); err == nil {
-			deleted++
+	batchSize := 1000
+	for {
+		toDelete, err := s.app.FindRecordsByFilter(changesCol,
+			"user_id = {:user_id} && entity = {:entity} && seq < {:min_seq}", "", batchSize, 0,
+			map[string]any{"user_id": authUser, "entity": entity, "min_seq": snapshot.MinSeq})
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "db error")
+			return
+		}
+		if len(toDelete) == 0 {
+			break
+		}
+
+		for _, rec := range toDelete {
+			if err := s.app.Delete(rec); err != nil {
+				log.Printf("compact: failed to delete record %s: %v", rec.Id, err)
+			} else {
+				deleted++
+			}
 		}
 	}
 
-	ok(w, map[string]any{"ok": true, "deleted_changes": deleted})
+	ok(w, map[string]any{"ok": true, "deleted": deleted})
 }
 
 func (s *Server) handleWipe(w http.ResponseWriter, r *http.Request) {
@@ -179,30 +188,51 @@ func (s *Server) handleWipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	toDelete, err := s.app.FindRecordsByFilter(changesCol,
-		"user_id = {:user_id}", "", 10000, 0,
-		map[string]any{"user_id": authUser})
-	if err != nil {
-		fail(w, http.StatusInternalServerError, "db error")
-		return
-	}
-
+	// Delete in batches to handle large datasets
 	var deleted int
-	for _, rec := range toDelete {
-		if err := s.app.Delete(rec); err == nil {
-			deleted++
+	batchSize := 1000
+	for {
+		toDelete, err := s.app.FindRecordsByFilter(changesCol,
+			"user_id = {:user_id}", "", batchSize, 0,
+			map[string]any{"user_id": authUser})
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "db error")
+			return
+		}
+		if len(toDelete) == 0 {
+			break
+		}
+
+		for _, rec := range toDelete {
+			if err := s.app.Delete(rec); err != nil {
+				log.Printf("wipe: failed to delete change %s: %v", rec.Id, err)
+			} else {
+				deleted++
+			}
 		}
 	}
 
-	// Also delete any snapshots for this user
+	// Also delete any snapshots for this user (in batches)
 	snapshotsCol, err := s.app.FindCollectionByNameOrId("sync_snapshots")
-	if err == nil {
-		snapshots, err := s.app.FindRecordsByFilter(snapshotsCol,
-			"user_id = {:user_id}", "", 1000, 0,
-			map[string]any{"user_id": authUser})
-		if err == nil {
+	if err != nil {
+		log.Printf("wipe: sync_snapshots collection not found: %v", err)
+	} else {
+		for {
+			snapshots, err := s.app.FindRecordsByFilter(snapshotsCol,
+				"user_id = {:user_id}", "", batchSize, 0,
+				map[string]any{"user_id": authUser})
+			if err != nil {
+				log.Printf("wipe: failed to query snapshots: %v", err)
+				break
+			}
+			if len(snapshots) == 0 {
+				break
+			}
+
 			for _, rec := range snapshots {
-				_ = s.app.Delete(rec)
+				if err := s.app.Delete(rec); err != nil {
+					log.Printf("wipe: failed to delete snapshot %s: %v", rec.Id, err)
+				}
 			}
 		}
 	}

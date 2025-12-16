@@ -177,6 +177,35 @@ func (c *Client) PullWithSnapshot(ctx context.Context, userID string, since int6
 	}, nil
 }
 
+// WipeResp contains the result of a wipe operation.
+type WipeResp struct {
+	Deleted int `json:"deleted"`
+}
+
+// Wipe deletes all server-side sync data for the authenticated user.
+// Use this to recover from AAD mismatch or start fresh.
+func (c *Client) Wipe(ctx context.Context) (WipeResp, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.BaseURL+"/v1/sync/wipe", nil)
+	if err != nil {
+		return WipeResp{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.cfg.AuthToken)
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return WipeResp{}, err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		return WipeResp{}, fmt.Errorf("wipe failed: %s", resp.Status)
+	}
+
+	var out WipeResp
+	return out, json.NewDecoder(resp.Body).Decode(&out)
+}
+
 // Compact triggers server-side compaction of old changes for the given entity.
 func (c *Client) Compact(ctx context.Context, userID, entity string) error {
 	url := fmt.Sprintf("%s/v1/sync/compact?entity=%s", c.cfg.BaseURL, entity)
