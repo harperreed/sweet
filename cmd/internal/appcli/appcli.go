@@ -118,6 +118,8 @@ func (a *App) Delete(ctx context.Context, entityID string) error {
 }
 
 // Sync pushes pending changes and pulls remote ones.
+// It first performs a catch-up sync to queue any local records that were
+// created before sync was configured.
 func (a *App) Sync(ctx context.Context) error {
 	if a.opts.ServerURL == "" || a.opts.AuthToken == "" {
 		return errors.New("server url and auth token required for sync")
@@ -125,7 +127,87 @@ func (a *App) Sync(ctx context.Context) error {
 	if a.opts.UserID == "" {
 		return errors.New("user id required for sync")
 	}
+
+	// Catch-up: queue any local records not already pending
+	if err := a.catchUpLocalRecords(ctx); err != nil {
+		return fmt.Errorf("catch-up sync: %w", err)
+	}
+
 	return vault.Sync(ctx, a.store, a.client, a.keys, a.opts.UserID, a.ApplyChange)
+}
+
+// catchUpLocalRecords scans app.db for records that aren't queued in the vault
+// outbox and queues them. This handles records created before login/sync was configured.
+func (a *App) catchUpLocalRecords(ctx context.Context) error {
+	rows, err := a.appDB.QueryContext(ctx,
+		`SELECT entity_id, payload, op FROM records WHERE entity = ?`, a.opts.Entity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+
+	prefixedEntity := a.client.PrefixedEntity(a.opts.Entity)
+
+	for rows.Next() {
+		var entityID, payloadStr, opStr string
+		if err := rows.Scan(&entityID, &payloadStr, &opStr); err != nil {
+			return err
+		}
+
+		// Check if already in outbox
+		hasPending, err := a.store.HasPendingForEntity(ctx, prefixedEntity, entityID)
+		if err != nil {
+			return err
+		}
+		if hasPending {
+			continue // Already queued
+		}
+
+		// Parse payload and re-queue
+		var payload map[string]any
+		if payloadStr != "" {
+			if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil {
+				return fmt.Errorf("unmarshal payload for %s: %w", entityID, err)
+			}
+		}
+
+		op := vault.Op(opStr)
+		if op == vault.OpDelete {
+			// Skip deleted records - they're already gone locally
+			continue
+		}
+
+		// Queue the record for sync
+		if err := a.queueExistingRecord(ctx, entityID, op, payload); err != nil {
+			return fmt.Errorf("queue %s: %w", entityID, err)
+		}
+	}
+	return rows.Err()
+}
+
+// queueExistingRecord queues an existing local record for sync without re-applying locally.
+func (a *App) queueExistingRecord(ctx context.Context, entityID string, op vault.Op, payload map[string]any) error {
+	baseVersion, err := a.GetVersion(ctx, a.opts.Entity, entityID)
+	if err != nil {
+		return err
+	}
+
+	prefixedEntity := a.client.PrefixedEntity(a.opts.Entity)
+	change, err := vault.NewChangeWithVersion(prefixedEntity, entityID, op, payload, baseVersion)
+	if err != nil {
+		return err
+	}
+
+	plain, err := json.Marshal(change)
+	if err != nil {
+		return err
+	}
+	aad := change.AAD(a.opts.UserID, a.opts.DeviceID)
+	env, err := vault.Encrypt(a.keys.EncKey, plain, aad)
+	if err != nil {
+		return err
+	}
+	return a.store.EnqueueEncryptedChange(ctx, change, a.opts.UserID, a.opts.DeviceID, env)
 }
 
 // ApplyChange is passed to vault.Sync to mutate local records.

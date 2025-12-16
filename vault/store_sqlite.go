@@ -172,3 +172,15 @@ func (s *Store) SyncStatus(ctx context.Context) (SyncStatus, error) {
 		LastPulledSeq:  seq,
 	}, nil
 }
+
+// HasPendingForEntity checks if there's an outbox entry for the given entity/entityID.
+func (s *Store) HasPendingForEntity(ctx context.Context, entity, entityID string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM outbox WHERE entity = ? AND entity_id = ?`,
+		entity, entityID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
