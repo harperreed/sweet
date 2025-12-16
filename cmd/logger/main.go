@@ -94,11 +94,15 @@ func syncCmd() {
 	}
 }
 
-const logEntity = "log"
+const (
+	logEntity = "log"
+	// Unique AppID for logger CLI - ensures namespace isolation from other apps
+	loggerAppID = "0365fb65-26e1-4a22-9760-d5e1cb75c740"
+)
 
 func runApp(cfg appcli.RuntimeConfig, fn func(context.Context, *appcli.App) error) (err error) {
 	ctx := context.Background()
-	app, err := appcli.NewApp(cfg.Options(logEntity))
+	app, err := appcli.NewApp(cfg.Options(loggerAppID, logEntity))
 	if err != nil {
 		return fmt.Errorf("init app: %w", err)
 	}

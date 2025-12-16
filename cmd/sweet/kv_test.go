@@ -210,6 +210,7 @@ func openTestApp(t *testing.T, seed vault.SeedPhrase, appDB, vaultDB string) *ap
 	t.Helper()
 
 	app, err := appcli.NewApp(appcli.Options{
+		AppID:      sweetAppID,
 		Entity:     kvEntity,
 		SeedPhrase: hex.EncodeToString(seed.Raw),
 		VaultPath:  vaultDB,

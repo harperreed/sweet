@@ -12,7 +12,11 @@ import (
 	"suitesync/cmd/internal/appcli"
 )
 
-const kvEntity = "kv"
+const (
+	kvEntity = "kv"
+	// Unique AppID for sweet CLI - ensures namespace isolation from other apps
+	sweetAppID = "a37a735a-7dec-464f-9c6b-032440c945de"
+)
 
 type parsedConfig struct {
 	runtime appcli.RuntimeConfig
@@ -214,7 +218,7 @@ func kvSync(args []string) error {
 
 func runKVApp(cfg appcli.RuntimeConfig, fn func(context.Context, *appcli.App) error) (err error) {
 	ctx := context.Background()
-	app, err := appcli.NewApp(cfg.Options(kvEntity))
+	app, err := appcli.NewApp(cfg.Options(sweetAppID, kvEntity))
 	if err != nil {
 		return fmt.Errorf("init app: %w", err)
 	}

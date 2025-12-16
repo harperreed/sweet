@@ -17,6 +17,7 @@ import (
 
 // Options wires shared CLI runtime bits.
 type Options struct {
+	AppID      string // Required: unique UUID per CLI app for namespace isolation
 	Entity     string
 	SeedPhrase string
 	Passphrase string
@@ -60,7 +61,7 @@ func NewApp(opts Options) (*App, error) {
 	}
 
 	client := vault.NewClient(vault.SyncConfig{
-		AppID:     "550e8400-e29b-41d4-a716-446655440000", // TODO: move to Options when implementing Task 6
+		AppID:     normalized.AppID,
 		BaseURL:   normalized.ServerURL,
 		DeviceID:  normalized.DeviceID,
 		AuthToken: normalized.AuthToken,
@@ -264,6 +265,9 @@ func (a *App) DumpRecords(ctx context.Context) ([]map[string]any, error) {
 }
 
 func normalizeOptions(opts Options) (Options, error) {
+	if opts.AppID == "" {
+		return opts, errors.New("app id required")
+	}
 	if opts.Entity == "" {
 		return opts, errors.New("entity required")
 	}

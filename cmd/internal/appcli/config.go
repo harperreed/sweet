@@ -27,9 +27,11 @@ func (rc *RuntimeConfig) BindFlags(fs *flag.FlagSet) {
 	fs.BoolVar(&rc.AutoSync, "auto-sync", rc.AutoSync, "sync after each write")
 }
 
-// Options converts runtime config into app Options for entity.
-func (rc RuntimeConfig) Options(entity string) Options {
+// Options converts runtime config into app Options for entity and appID.
+// Each CLI app must provide a unique hardcoded UUID for namespace isolation.
+func (rc RuntimeConfig) Options(appID, entity string) Options {
 	return Options{
+		AppID:      appID,
 		Entity:     entity,
 		SeedPhrase: rc.SeedPhrase,
 		Passphrase: rc.Passphrase,

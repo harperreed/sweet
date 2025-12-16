@@ -111,11 +111,15 @@ func list() {
 	}
 }
 
-const todoEntity = "todo"
+const (
+	todoEntity = "todo"
+	// Unique AppID for todo CLI - ensures namespace isolation from other apps
+	todoAppID = "bddfd5a4-e494-4f65-9057-42b672eded2c"
+)
 
 func runApp(cfg appcli.RuntimeConfig, fn func(context.Context, *appcli.App) error) (err error) {
 	ctx := context.Background()
-	app, err := appcli.NewApp(cfg.Options(todoEntity))
+	app, err := appcli.NewApp(cfg.Options(todoAppID, todoEntity))
 	if err != nil {
 		return fmt.Errorf("init app: %w", err)
 	}

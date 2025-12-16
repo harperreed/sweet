@@ -110,11 +110,15 @@ func syncCmd() {
 	}
 }
 
-const noteEntity = "note"
+const (
+	noteEntity = "note"
+	// Unique AppID for notes CLI - ensures namespace isolation from other apps
+	notesAppID = "ad431033-a18b-44d7-9ec0-b6493843ce3f"
+)
 
 func runApp(cfg appcli.RuntimeConfig, fn func(context.Context, *appcli.App) error) (err error) {
 	ctx := context.Background()
-	app, err := appcli.NewApp(cfg.Options(noteEntity))
+	app, err := appcli.NewApp(cfg.Options(notesAppID, noteEntity))
 	if err != nil {
 		return fmt.Errorf("init app: %w", err)
 	}
