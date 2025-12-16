@@ -98,15 +98,13 @@ func getClientIP(r *http.Request) string {
 	if os.Getenv("TRUSTED_PROXY") == "1" {
 		// Check X-Forwarded-For header (first IP in chain is the client)
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			// Take the first IP in the list
-			if idx := len(xff); idx > 0 {
-				for i, c := range xff {
-					if c == ',' {
-						return xff[:i]
-					}
+			// Take the first IP in the list (before first comma)
+			for i, c := range xff {
+				if c == ',' {
+					return xff[:i]
 				}
-				return xff
 			}
+			return xff
 		}
 
 		// Check X-Real-IP header
