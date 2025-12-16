@@ -20,9 +20,9 @@ import (
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/router"
 
-	pbclient "suitesync/internal/pocketbase"
+	pbclient "github.com/harperreed/sweet/internal/pocketbase"
 
-	_ "suitesync/cmd/syncvaultd/migrations" // Import migrations
+	_ "github.com/harperreed/sweet/cmd/syncvaultd/migrations" // Import migrations
 )
 
 const deviceHeader = "X-Vault-Device-ID"

@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"suitesync/cmd/internal/appcli"
+	"github.com/harperreed/sweet/cmd/internal/appcli"
 )
 
 const (

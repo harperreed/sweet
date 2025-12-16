@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"suitesync/vault"
+	"github.com/harperreed/sweet/vault"
 
 	"github.com/pocketbase/pocketbase/core"
 )

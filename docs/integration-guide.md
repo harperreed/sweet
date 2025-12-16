@@ -62,23 +62,19 @@ See the [Migration Guide](./migration-guide-v0.3.md) for upgrading existing inte
 
 ### 1. Add the Dependency
 
-The module is hosted on GitHub but declares itself as `suitesync`, so a replace directive is required:
+```bash
+go get github.com/harperreed/sweet@v0.3.1
+```
 
-In `go.mod`:
+Or in `go.mod`:
 ```go
-require (
-    suitesync v0.2.7
-)
-
-replace suitesync => github.com/harperreed/sweet v0.2.7
+require github.com/harperreed/sweet v0.3.1
 ```
 
 Then run:
 ```bash
 go mod tidy
 ```
-
-**Note:** The replace directive means `go mod verify` will fail. Either disable that hook or use `SKIP=go-mod-verify` in pre-commit.
 
 ### 2. Create Your Sync Config
 
@@ -165,7 +161,7 @@ import (
     "time"
 
     "github.com/google/uuid"
-    "suitesync/vault"
+    "github.com/harperreed/sweet/vault"
 )
 
 type Syncer struct {
@@ -396,7 +392,7 @@ import (
     "path/filepath"
     "time"
 
-    "suitesync/vault"
+    "github.com/harperreed/sweet/vault"
 )
 
 func login(server, email, password, mnemonic string) error {

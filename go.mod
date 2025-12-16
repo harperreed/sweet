@@ -1,4 +1,4 @@
-module suitesync
+module github.com/harperreed/sweet
 
 go 1.24.0
 

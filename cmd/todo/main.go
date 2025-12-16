@@ -8,8 +8,8 @@ import (
 	"os"
 	"time"
 
-	"suitesync/cmd/internal/appcli"
-	"suitesync/vault"
+	"github.com/harperreed/sweet/cmd/internal/appcli"
+	"github.com/harperreed/sweet/vault"
 )
 
 func main() {

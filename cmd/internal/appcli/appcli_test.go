@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"suitesync/vault"
+	"github.com/harperreed/sweet/vault"
 )
 
 func TestConflictDetection(t *testing.T) {

@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"suitesync/vault"
+	"github.com/harperreed/sweet/vault"
 
 	"golang.org/x/term"
 )

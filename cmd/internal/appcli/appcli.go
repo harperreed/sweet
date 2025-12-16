@@ -12,7 +12,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	"suitesync/vault"
+	"github.com/harperreed/sweet/vault"
 )
 
 // Options wires shared CLI runtime bits.

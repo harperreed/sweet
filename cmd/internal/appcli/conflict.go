@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"suitesync/vault"
+	"github.com/harperreed/sweet/vault"
 )
 
 // Conflict represents a detected version conflict.

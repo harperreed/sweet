@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"suitesync/cmd/internal/appcli"
-	"suitesync/vault"
+	"github.com/harperreed/sweet/cmd/internal/appcli"
+	"github.com/harperreed/sweet/vault"
 )
 
 func TestKVSetAndGet(t *testing.T) {

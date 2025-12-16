@@ -10,7 +10,7 @@ import (
 	"os"
 	"time"
 
-	"suitesync/cmd/sweet/internal/inspect"
+	"github.com/harperreed/sweet/cmd/sweet/internal/inspect"
 )
 
 const defaultAppDBPath = "./suite-sync.db"

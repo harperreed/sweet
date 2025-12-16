@@ -15,8 +15,8 @@ import (
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
 
-	pbclient "suitesync/internal/pocketbase"
-	"suitesync/vault"
+	pbclient "github.com/harperreed/sweet/internal/pocketbase"
+	"github.com/harperreed/sweet/vault"
 )
 
 func TestSyncEndToEnd(t *testing.T) {
