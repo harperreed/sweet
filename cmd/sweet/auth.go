@@ -64,10 +64,20 @@ func cmdRegister(args []string) error {
 		return fmt.Errorf("password must be at least 8 characters")
 	}
 
+	// Load or initialize config to capture device ID for registration
+	cfg, _ := LoadConfig()
+	if cfg == nil {
+		cfg = &Config{}
+	}
+	if cfg.DeviceID == "" {
+		cfg.DeviceID = randHex(16)
+	}
+	deviceID := cfg.DeviceID
+
 	// Register with server
 	fmt.Printf("\nRegistering with %s...\n", *server)
 	client := vault.NewPBAuthClient(*server)
-	result, err := client.Register(context.Background(), email, password)
+	result, err := client.Register(context.Background(), email, password, deviceID)
 	if err != nil {
 		return fmt.Errorf("registration failed: %w", err)
 	}
@@ -92,10 +102,6 @@ func cmdRegister(args []string) error {
 	derivedKeyHex := hex.EncodeToString(seed.Raw)
 
 	// Save config
-	cfg, _ := LoadConfig()
-	if cfg == nil {
-		cfg = &Config{}
-	}
 	cfg.Server = *server
 	cfg.Email = email
 	cfg.UserID = result.UserID
@@ -103,9 +109,7 @@ func cmdRegister(args []string) error {
 	cfg.TokenExpires = result.Token.Expires.Format(time.RFC3339)
 	cfg.DerivedKey = derivedKeyHex
 	cfg.AppID = appID
-	if cfg.DeviceID == "" {
-		cfg.DeviceID = randHex(16)
-	}
+	cfg.DeviceID = deviceID
 	if cfg.AppDB == "" {
 		cfg.AppDB = ConfigDir() + "/app.db"
 	}
@@ -138,6 +142,10 @@ func cmdLogin(args []string) error {
 	if cfg == nil {
 		cfg = &Config{}
 	}
+	if cfg.DeviceID == "" {
+		cfg.DeviceID = randHex(16)
+	}
+	deviceID := cfg.DeviceID
 
 	serverURL := *server
 	if serverURL == "" {
@@ -178,7 +186,7 @@ func cmdLogin(args []string) error {
 	// Login to server
 	fmt.Printf("\nLogging in to %s...\n", serverURL)
 	client := vault.NewPBAuthClient(serverURL)
-	result, err := client.Login(context.Background(), email, password)
+	result, err := client.Login(context.Background(), email, password, deviceID)
 	if err != nil {
 		return fmt.Errorf("login failed: %w", err)
 	}
@@ -199,9 +207,7 @@ func cmdLogin(args []string) error {
 	cfg.TokenExpires = result.Token.Expires.Format(time.RFC3339)
 	cfg.DerivedKey = derivedKeyHex
 	cfg.AppID = appID
-	if cfg.DeviceID == "" {
-		cfg.DeviceID = randHex(16)
-	}
+	cfg.DeviceID = deviceID
 	if cfg.AppDB == "" {
 		cfg.AppDB = ConfigDir() + "/app.db"
 	}

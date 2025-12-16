@@ -97,7 +97,10 @@ func (s *Server) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete device (JWT tokens are managed by PocketBase, no need to delete)
+	if err := s.recordDeviceRevocation(userID, deviceID); err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if err := s.app.Delete(deviceRecord); err != nil {
 		fail(w, http.StatusInternalServerError, "db error")
 		return
@@ -106,39 +109,117 @@ func (s *Server) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{"ok": true, "revoked": deviceID})
 }
 
-// validateDeviceRegistration checks if a device is registered for the user.
-// If the device is not registered, it auto-registers it (first-use registration).
-// If the device was previously registered but deleted (revoked), it rejects the request.
-func (s *Server) validateDeviceRegistration(userID, deviceID string) error {
+// ensureDeviceAllowed verifies the device exists and updates last_used_at.
+func (s *Server) ensureDeviceAllowed(userID, deviceID string) error {
 	devicesCol, err := s.app.FindCollectionByNameOrId("sync_devices")
 	if err != nil {
-		return errors.New("collection not found")
+		return errors.New("devices collection not found")
 	}
 
-	// Check if device is currently registered
-	_, err = s.app.FindFirstRecordByFilter(devicesCol, "device_id = {:device_id} && user_id = {:user_id}",
-		map[string]any{"device_id": deviceID, "user_id": userID})
+	record, err := s.app.FindFirstRecordByFilter(devicesCol, "device_id = {:device_id}",
+		map[string]any{"device_id": deviceID})
+	if err != nil {
+		return errors.New("device not registered")
+	}
+	if record.GetString("user_id") != userID {
+		return errors.New("device not registered for this user")
+	}
 
+	record.Set("last_used_at", time.Now().Unix())
+	if err := s.app.Save(record); err != nil {
+		return errors.New("failed to update device usage")
+	}
+	return nil
+}
+
+// registerDevice records device metadata after register/login.
+func (s *Server) registerDevice(userID, deviceID string) error {
+	if deviceID == "" {
+		return errors.New("device id required")
+	}
+
+	if revoked, err := s.isDeviceRevoked(userID, deviceID); err != nil {
+		return err
+	} else if revoked {
+		return errors.New("device has been revoked")
+	}
+
+	devicesCol, err := s.app.FindCollectionByNameOrId("sync_devices")
+	if err != nil {
+		return errors.New("devices collection not found")
+	}
+
+	record, err := s.app.FindFirstRecordByFilter(devicesCol, "device_id = {:device_id}",
+		map[string]any{"device_id": deviceID})
 	if err == nil {
-		// Device is registered, allow the push
-		return nil
+		if record.GetString("user_id") != userID {
+			return errors.New("device belongs to another user")
+		}
+		record.Set("last_used_at", time.Now().Unix())
+		return s.app.Save(record)
 	}
 
-	// Device not found - check if it was previously registered but revoked
-	// by looking for any historical record (this is a simple check - a more robust
-	// implementation would maintain a separate revoked_devices table)
-	// For now, we auto-register new devices on first push.
-
-	// Auto-register this device
 	newDevice := core.NewRecord(devicesCol)
 	newDevice.Set("user_id", userID)
 	newDevice.Set("device_id", deviceID)
 	newDevice.Set("name", deviceID)
 	newDevice.Set("last_used_at", time.Now().Unix())
+	return s.app.Save(newDevice)
+}
 
-	if err := s.app.Save(newDevice); err != nil {
-		return errors.New("failed to register device")
+func (s *Server) recordDeviceRevocation(userID, deviceID string) error {
+	revokedCol, err := s.app.FindCollectionByNameOrId("revoked_devices")
+	if err != nil {
+		return errors.New("revoked devices collection not found")
 	}
 
+	_, err = s.app.FindFirstRecordByFilter(revokedCol, "user_id = {:user_id} && device_id = {:device_id}",
+		map[string]any{"user_id": userID, "device_id": deviceID})
+	if err == nil {
+		return nil
+	}
+
+	record := core.NewRecord(revokedCol)
+	record.Set("user_id", userID)
+	record.Set("device_id", deviceID)
+	record.Set("revoked_at", time.Now().Unix())
+	if err := s.app.Save(record); err != nil {
+		return errors.New("failed to record revocation")
+	}
+	return nil
+}
+
+func (s *Server) isDeviceRevoked(userID, deviceID string) (bool, error) {
+	revokedCol, err := s.app.FindCollectionByNameOrId("revoked_devices")
+	if err != nil {
+		return false, errors.New("revoked devices collection not found")
+	}
+
+	record, err := s.app.FindFirstRecordByFilter(revokedCol, "user_id = {:user_id} && device_id = {:device_id}",
+		map[string]any{"user_id": userID, "device_id": deviceID})
+	if err != nil {
+		return false, nil
+	}
+	if record.GetString("user_id") != userID {
+		return true, nil
+	}
+	return true, nil
+}
+
+// ensureDeviceExists checks that a device belongs to the user without updating metadata.
+func (s *Server) ensureDeviceExists(userID, deviceID string) error {
+	devicesCol, err := s.app.FindCollectionByNameOrId("sync_devices")
+	if err != nil {
+		return errors.New("devices collection not found")
+	}
+
+	record, err := s.app.FindFirstRecordByFilter(devicesCol, "device_id = {:device_id}",
+		map[string]any{"device_id": deviceID})
+	if err != nil {
+		return errors.New("device not registered")
+	}
+	if record.GetString("user_id") != userID {
+		return errors.New("device not registered for this user")
+	}
 	return nil
 }

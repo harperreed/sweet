@@ -21,6 +21,7 @@ import (
 type pbRegisterReq struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+	DeviceID string `json:"device_id"`
 }
 
 //nolint:funlen // Auth registration requires multiple validation and creation steps.
@@ -40,6 +41,11 @@ func (s *Server) handlePBRegister(w http.ResponseWriter, r *http.Request) {
 	req.Password = strings.TrimSpace(req.Password)
 	if req.Email == "" || req.Password == "" {
 		fail(w, http.StatusBadRequest, "email and password required")
+		return
+	}
+	req.DeviceID = strings.TrimSpace(req.DeviceID)
+	if req.DeviceID == "" {
+		fail(w, http.StatusBadRequest, "device_id required")
 		return
 	}
 
@@ -85,6 +91,12 @@ func (s *Server) handlePBRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.registerDevice(userRecord.Id, req.DeviceID); err != nil {
+		log.Printf("device registration error: %v", err)
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Generate verification token
 	verificationToken, err := userRecord.NewVerificationToken()
 	if err != nil {
@@ -120,6 +132,7 @@ func (s *Server) handlePBRegister(w http.ResponseWriter, r *http.Request) {
 type pbLoginReq struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+	DeviceID string `json:"device_id"`
 }
 
 //nolint:funlen // Auth login requires validation, password check, and token generation.
@@ -139,6 +152,11 @@ func (s *Server) handlePBLogin(w http.ResponseWriter, r *http.Request) {
 	req.Password = strings.TrimSpace(req.Password)
 	if req.Email == "" || req.Password == "" {
 		fail(w, http.StatusBadRequest, "email and password required")
+		return
+	}
+	req.DeviceID = strings.TrimSpace(req.DeviceID)
+	if req.DeviceID == "" {
+		fail(w, http.StatusBadRequest, "device_id required")
 		return
 	}
 
@@ -164,6 +182,11 @@ func (s *Server) handlePBLogin(w http.ResponseWriter, r *http.Request) {
 	// Check if verified
 	if !userRecord.Verified() {
 		fail(w, http.StatusForbidden, "please verify your email first")
+		return
+	}
+
+	if err := s.registerDevice(userRecord.Id, req.DeviceID); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
 

@@ -26,6 +26,38 @@ This is a PocketBase instance with the sync API endpoints. You can:
 
 No setup required - just point your app at `https://api.storeusa.org` and start syncing.
 
+## Device Validation (v0.3.0+)
+
+Starting with v0.3.0, the sync server requires device validation for all authenticated requests. This provides:
+- Per-device access control and revocation
+- Audit trail of device usage
+- Protection against token theft (stolen tokens are useless without registered device)
+
+### Requirements
+
+1. **Device ID in Config**: Every client must have a stable device ID (UUID recommended)
+2. **Device Registration**: Devices must be registered during login/register
+3. **Device Header**: All authenticated requests must include `X-Vault-Device-ID` header
+
+The vault client library handles headers automatically when `DeviceID` is set in `SyncConfig`.
+
+### Device Lifecycle
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Generate  │────▶│  Register   │────▶│    Use      │
+│  Device ID  │     │  at Login   │     │  for Sync   │
+└─────────────┘     └─────────────┘     └─────────────┘
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │   Revoke    │
+                    │  (optional) │
+                    └─────────────┘
+```
+
+See the [Migration Guide](./migration-guide-v0.3.md) for upgrading existing integrations.
+
 ## Quick Start
 
 ### 1. Add the Dependency
@@ -165,9 +197,10 @@ func NewSyncer(cfg *Config, appDB *sql.DB) (*Syncer, error) {
         return nil, fmt.Errorf("open vault store: %w", err)
     }
 
+    // DeviceID is REQUIRED - client will panic if empty (v0.3.0+)
     client := vault.NewClient(vault.SyncConfig{
         BaseURL:   cfg.Server,
-        DeviceID:  cfg.DeviceID,
+        DeviceID:  cfg.DeviceID,  // Must match registered device
         AuthToken: cfg.Token,
     })
 
@@ -372,9 +405,12 @@ func login(server, email, password, mnemonic string) error {
         return fmt.Errorf("invalid recovery phrase: %w", err)
     }
 
-    // Login to server
+    // Generate or load existing device ID (must be stable across sessions)
+    deviceID := loadOrGenerateDeviceID()
+
+    // Login to server - device_id is REQUIRED for v0.3.0+
     client := vault.NewPBAuthClient(server)
-    result, err := client.Login(context.Background(), email, password)
+    result, err := client.LoginWithDevice(context.Background(), email, password, deviceID)
     if err != nil {
         return fmt.Errorf("login failed: %w", err)
     }
@@ -394,12 +430,22 @@ func login(server, email, password, mnemonic string) error {
         RefreshToken: result.RefreshToken,
         TokenExpires: result.Token.Expires.Format(time.RFC3339),
         DerivedKey:   derivedKeyHex,
-        DeviceID:     GenerateDeviceID(),
+        DeviceID:     deviceID,  // Store the registered device ID
         VaultDB:      filepath.Join(ConfigDir(), "vault.db"),
         AutoSync:     true, // Enable auto-sync by default
     }
 
     return SaveConfig(cfg)
+}
+
+// loadOrGenerateDeviceID returns a stable device ID.
+// Generate once on first login, then reuse for all subsequent logins.
+func loadOrGenerateDeviceID() string {
+    cfg, err := LoadConfig()
+    if err == nil && cfg.DeviceID != "" {
+        return cfg.DeviceID  // Reuse existing device ID
+    }
+    return GenerateDeviceID()  // Generate new ULID
 }
 ```
 

@@ -48,6 +48,27 @@ func init() {
 			return err
 		}
 
+		// revoked_devices collection
+		revokedDevices := core.NewBaseCollection("revoked_devices")
+		revokedDevices.Fields.Add(
+			&core.TextField{
+				Name:     "device_id",
+				Required: true,
+			},
+			&core.TextField{
+				Name:     "user_id",
+				Required: true,
+			},
+			&core.NumberField{
+				Name:     "revoked_at",
+				Required: true,
+			},
+		)
+		revokedDevices.AddIndex("idx_revoked_devices_user_device", true, "user_id, device_id", "")
+		if err := app.Save(revokedDevices); err != nil {
+			return err
+		}
+
 		// sync_changes collection
 		syncChanges := core.NewBaseCollection("sync_changes")
 		syncChanges.Fields.Add(
@@ -134,6 +155,7 @@ func init() {
 		collections := []string{
 			"sync_snapshots",
 			"sync_changes",
+			"revoked_devices",
 			"sync_devices",
 			"sync_users",
 		}

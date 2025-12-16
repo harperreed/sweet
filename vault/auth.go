@@ -59,19 +59,24 @@ type RefreshResult struct {
 
 // Register creates a new user account with email/password.
 // Returns a mnemonic phrase that the user MUST save for recovery.
-func (c *PBAuthClient) Register(ctx context.Context, email, password string) (RegisterResult, error) {
+func (c *PBAuthClient) Register(ctx context.Context, email, password, deviceID string) (RegisterResult, error) {
 	email = strings.TrimSpace(email)
 	password = strings.TrimSpace(password)
 	if email == "" || password == "" {
 		return RegisterResult{}, errors.New("email and password required")
 	}
+	if strings.TrimSpace(deviceID) == "" {
+		return RegisterResult{}, errors.New("device id required")
+	}
 
 	req := struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
+		DeviceID string `json:"device_id"`
 	}{
 		Email:    email,
 		Password: password,
+		DeviceID: deviceID,
 	}
 
 	resp, err := c.doJSON(ctx, "/v1/auth/pb/register", req)
@@ -105,19 +110,24 @@ func (c *PBAuthClient) Register(ctx context.Context, email, password string) (Re
 }
 
 // Login authenticates with email/password and returns tokens.
-func (c *PBAuthClient) Login(ctx context.Context, email, password string) (LoginResult, error) {
+func (c *PBAuthClient) Login(ctx context.Context, email, password, deviceID string) (LoginResult, error) {
 	email = strings.TrimSpace(email)
 	password = strings.TrimSpace(password)
 	if email == "" || password == "" {
 		return LoginResult{}, errors.New("email and password required")
 	}
+	if strings.TrimSpace(deviceID) == "" {
+		return LoginResult{}, errors.New("device id required")
+	}
 
 	req := struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
+		DeviceID string `json:"device_id"`
 	}{
 		Email:    email,
 		Password: password,
+		DeviceID: deviceID,
 	}
 
 	resp, err := c.doJSON(ctx, "/v1/auth/pb/login", req)

@@ -24,12 +24,13 @@ func TestAuthClientRegister(t *testing.T) {
 		var req struct {
 			Email    string `json:"email"`
 			Password string `json:"password"`
+			DeviceID string `json:"device_id"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
-		if req.Email == "" || req.Password == "" {
+		if req.Email == "" || req.Password == "" || req.DeviceID == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "email and password required"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "email, password, and device required"})
 			return
 		}
 
@@ -43,7 +44,7 @@ func TestAuthClientRegister(t *testing.T) {
 	defer server.Close()
 
 	client := NewPBAuthClient(server.URL)
-	result, err := client.Register(context.Background(), "test@example.com", "password123")
+	result, err := client.Register(context.Background(), "test@example.com", "password123", "test-device")
 	if err != nil {
 		t.Fatalf("Register failed: %v", err)
 	}
@@ -75,7 +76,7 @@ func TestAuthClientLogin(t *testing.T) {
 	defer server.Close()
 
 	client := NewPBAuthClient(server.URL)
-	result, err := client.Login(context.Background(), "test@example.com", "password123")
+	result, err := client.Login(context.Background(), "test@example.com", "password123", "test-device")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -150,7 +151,7 @@ func TestAuthClientRegisterEmptyCredentials(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := client.Register(context.Background(), tc.email, tc.password)
+			_, err := client.Register(context.Background(), tc.email, tc.password, "device-123")
 			if err == nil {
 				t.Fatal("expected error for empty credentials, got nil")
 			}
@@ -158,6 +159,14 @@ func TestAuthClientRegisterEmptyCredentials(t *testing.T) {
 				t.Errorf("unexpected error message: %v", err)
 			}
 		})
+	}
+}
+
+func TestAuthClientRegisterMissingDeviceID(t *testing.T) {
+	client := NewPBAuthClient("http://localhost:8080")
+	_, err := client.Register(context.Background(), "test@example.com", "password123", "")
+	if err == nil || err.Error() != "device id required" {
+		t.Fatalf("expected device id required error, got %v", err)
 	}
 }
 
@@ -205,7 +214,7 @@ func TestAuthClientLoginServerError(t *testing.T) {
 			defer server.Close()
 
 			client := NewPBAuthClient(server.URL)
-			_, err := client.Login(context.Background(), "test@example.com", "password123")
+			_, err := client.Login(context.Background(), "test@example.com", "password123", "device-xyz")
 			if err == nil {
 				t.Fatal("expected error for server error, got nil")
 			}

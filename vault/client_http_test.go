@@ -28,6 +28,7 @@ func TestClient_Health_OK(t *testing.T) {
 	client := NewClient(SyncConfig{
 		AppID:        "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:      server.URL,
+		DeviceID:     "test-device",
 		TokenExpires: time.Now().Add(1 * time.Hour),
 	})
 
@@ -48,6 +49,7 @@ func TestClient_Health_ServerDown(t *testing.T) {
 	client := NewClient(SyncConfig{
 		AppID:        "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:      "http://localhost:59999", // unlikely to be listening
+		DeviceID:     "test-device",
 		TokenExpires: time.Now().Add(1 * time.Hour),
 	})
 
@@ -70,6 +72,7 @@ func TestClient_Health_TokenExpired(t *testing.T) {
 	client := NewClient(SyncConfig{
 		AppID:        "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:      server.URL,
+		DeviceID:     "test-device",
 		TokenExpires: time.Now().Add(-1 * time.Hour), // expired
 	})
 
@@ -87,6 +90,7 @@ func TestClient_EnsureValidToken_NotExpired(t *testing.T) {
 	client := NewClient(SyncConfig{
 		AppID:        "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:      "http://localhost",
+		DeviceID:     "test-device",
 		TokenExpires: time.Now().Add(1 * time.Hour), // valid for 1 hour
 	})
 
@@ -100,6 +104,7 @@ func TestClient_EnsureValidToken_ExpiredNoRefresh(t *testing.T) {
 	client := NewClient(SyncConfig{
 		AppID:        "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:      "http://localhost",
+		DeviceID:     "test-device",
 		TokenExpires: time.Now().Add(-1 * time.Hour), // expired
 		RefreshToken: "",                             // no refresh token
 	})
@@ -134,6 +139,7 @@ func TestClient_EnsureValidToken_RefreshSuccess(t *testing.T) {
 	client := NewClient(SyncConfig{
 		AppID:        "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:      server.URL,
+		DeviceID:     "test-device",
 		AuthToken:    "old-token",
 		RefreshToken: "old-refresh",
 		TokenExpires: time.Now().Add(-1 * time.Minute), // about to expire

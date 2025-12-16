@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const deviceHeader = "X-Vault-Device-ID"
+
 // Client performs push/pull RPCs against sync server.
 type Client struct {
 	cfg SyncConfig
@@ -25,6 +27,9 @@ func NewClient(cfg SyncConfig) *Client {
 	}
 	if !isValidUUID(cfg.AppID) {
 		panic("vault: AppID must be a valid UUID")
+	}
+	if strings.TrimSpace(cfg.DeviceID) == "" {
+		panic("vault: DeviceID is required")
 	}
 
 	to := cfg.Timeout
@@ -105,6 +110,7 @@ func (c *Client) Push(ctx context.Context, userID string, items []PushItem) (Pus
 	}
 	req.Header.Set("Authorization", "Bearer "+c.cfg.AuthToken)
 	req.Header.Set("Content-Type", "application/json")
+	c.setDeviceHeader(req)
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -148,6 +154,7 @@ func (c *Client) Pull(ctx context.Context, userID string, sinceSeq int64) (PullR
 		return PullResp{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.cfg.AuthToken)
+	c.setDeviceHeader(req)
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -190,6 +197,7 @@ func (c *Client) PullWithSnapshot(ctx context.Context, userID string, since int6
 		return PullRespWithSnapshot{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.cfg.AuthToken)
+	c.setDeviceHeader(req)
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -229,6 +237,7 @@ func (c *Client) Wipe(ctx context.Context) (WipeResp, error) {
 		return WipeResp{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.cfg.AuthToken)
+	c.setDeviceHeader(req)
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -254,6 +263,7 @@ func (c *Client) Compact(ctx context.Context, userID, entity string) error {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.cfg.AuthToken)
+	c.setDeviceHeader(req)
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -291,6 +301,7 @@ func (c *Client) Health(ctx context.Context) HealthStatus {
 		return status
 	}
 	req.Header.Set("Authorization", "Bearer "+c.cfg.AuthToken)
+	c.setDeviceHeader(req)
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -344,4 +355,8 @@ func (c *Client) EnsureValidToken(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (c *Client) setDeviceHeader(req *http.Request) {
+	req.Header.Set(deviceHeader, c.cfg.DeviceID)
 }

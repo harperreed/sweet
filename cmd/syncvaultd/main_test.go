@@ -26,14 +26,20 @@ func TestSyncEndToEnd(t *testing.T) {
 }
 
 type serverTestEnv struct {
-	t      *testing.T
-	ctx    context.Context
-	dir    string
-	server *httptest.Server
-	srv    *Server
-	keys   vault.Keys
-	userID string
-	token  string
+	t        *testing.T
+	ctx      context.Context
+	dir      string
+	server   *httptest.Server
+	srv      *Server
+	keys     vault.Keys
+	userID   string
+	token    string
+	deviceID string
+}
+
+func setAuthHeaders(req *http.Request, token, deviceID string) {
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set(deviceHeader, deviceID)
 }
 
 func newServerTestEnv(t *testing.T) *serverTestEnv {
@@ -53,21 +59,23 @@ func newServerTestEnvWithPB(t *testing.T, pb pbclient.Client) *serverTestEnv {
 	keys := generateTestKeys(t)
 
 	// Create user and get both token and PB record ID (which is our userID for auth)
-	token, userID := createTestUserAndTokenWithID(t, app, "device-test")
+	deviceID := "device-test"
+	token, userID := createTestUserAndTokenWithID(t, app, deviceID)
 
 	if init, ok := pb.(pocketbaseAccountInitializer); ok {
 		init.ensureAccount(userID)
 	}
 
 	return &serverTestEnv{
-		t:      t,
-		ctx:    ctx,
-		dir:    dir,
-		server: ts,
-		srv:    srv,
-		keys:   keys,
-		userID: userID,
-		token:  token,
+		t:        t,
+		ctx:      ctx,
+		dir:      dir,
+		server:   ts,
+		srv:      srv,
+		keys:     keys,
+		userID:   userID,
+		token:    token,
+		deviceID: deviceID,
 	}
 }
 
@@ -143,6 +151,27 @@ func runTestMigrations(app core.App) error {
 	syncDevices.AddIndex("idx_sync_devices_device_id", true, "device_id", "")
 	syncDevices.AddIndex("idx_sync_devices_user_id", false, "user_id", "")
 	if err := app.Save(syncDevices); err != nil {
+		return err
+	}
+
+	// Create revoked_devices collection
+	revokedDevices := core.NewBaseCollection("revoked_devices")
+	revokedDevices.Fields.Add(
+		&core.TextField{
+			Name:     "device_id",
+			Required: true,
+		},
+		&core.TextField{
+			Name:     "user_id",
+			Required: true,
+		},
+		&core.NumberField{
+			Name:     "revoked_at",
+			Required: true,
+		},
+	)
+	revokedDevices.AddIndex("idx_revoked_devices_device_id", true, "device_id", "")
+	if err := app.Save(revokedDevices); err != nil {
 		return err
 	}
 
@@ -332,6 +361,8 @@ func (e *serverTestEnv) pushChange(t *testing.T, deviceID string) vault.Change {
 	store := openTestStore(t, filepath.Join(e.dir, deviceID+".sqlite"))
 	defer closeTestStore(t, store)
 
+	ensureDeviceRecord(t, e.srv.app, e.userID, deviceID)
+
 	client := vault.NewClient(vault.SyncConfig{
 		AppID:     "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:   e.server.URL,
@@ -372,6 +403,8 @@ func (e *serverTestEnv) pushChange(t *testing.T, deviceID string) vault.Change {
 func (e *serverTestEnv) pullChangeOnSecondDevice(t *testing.T, deviceID, expectedChangeID string) {
 	store := openTestStore(t, filepath.Join(e.dir, deviceID+".sqlite"))
 	defer closeTestStore(t, store)
+
+	ensureDeviceRecord(t, e.srv.app, e.userID, deviceID)
 
 	client := vault.NewClient(vault.SyncConfig{
 		AppID:     "550e8400-e29b-41d4-a716-446655440000",
@@ -483,7 +516,7 @@ func TestRateLimitRejects429(t *testing.T) {
 
 	// First request should succeed
 	req1, _ := http.NewRequest("GET", env.server.URL+"/v1/sync/pull?user_id="+env.userID+"&since=0", nil)
-	req1.Header.Set("Authorization", "Bearer "+env.token)
+	setAuthHeaders(req1, env.token, "device-test")
 	resp1, err := client.Do(req1)
 	if err != nil {
 		t.Fatalf("first request: %v", err)
@@ -497,7 +530,7 @@ func TestRateLimitRejects429(t *testing.T) {
 
 	// Rapid second request should be rate limited
 	req2, _ := http.NewRequest("GET", env.server.URL+"/v1/sync/pull?user_id="+env.userID+"&since=0", nil)
-	req2.Header.Set("Authorization", "Bearer "+env.token)
+	setAuthHeaders(req2, env.token, "device-test")
 	resp2, err := client.Do(req2)
 	if err != nil {
 		t.Fatalf("second request: %v", err)
@@ -528,7 +561,7 @@ func TestMultipleDevicesCanAuthenticate(t *testing.T) {
 	client := &http.Client{}
 
 	reqA, _ := http.NewRequest("GET", ts.URL+"/v1/sync/pull?user_id="+userID+"&since=0", nil)
-	reqA.Header.Set("Authorization", "Bearer "+tokenA)
+	setAuthHeaders(reqA, tokenA, "device-a")
 	respA, err := client.Do(reqA)
 	if err != nil {
 		t.Fatalf("device A request: %v", err)
@@ -541,7 +574,7 @@ func TestMultipleDevicesCanAuthenticate(t *testing.T) {
 	}
 
 	reqB, _ := http.NewRequest("GET", ts.URL+"/v1/sync/pull?user_id="+userID+"&since=0", nil)
-	reqB.Header.Set("Authorization", "Bearer "+tokenB)
+	setAuthHeaders(reqB, tokenB, "device-b")
 	respB, err := client.Do(reqB)
 	if err != nil {
 		t.Fatalf("device B request: %v", err)
@@ -588,6 +621,26 @@ func createTestDeviceToken(t *testing.T, app core.App, userID, deviceID string) 
 	return token
 }
 
+func ensureDeviceRecord(t *testing.T, app core.App, userID, deviceID string) {
+	t.Helper()
+	devicesCol, err := app.FindCollectionByNameOrId("sync_devices")
+	if err != nil {
+		t.Fatalf("find sync_devices collection: %v", err)
+	}
+	_, err = app.FindFirstRecordByFilter(devicesCol, "device_id = {:device_id}",
+		map[string]any{"device_id": deviceID})
+	if err == nil {
+		return
+	}
+	deviceRecord := core.NewRecord(devicesCol)
+	deviceRecord.Set("user_id", userID)
+	deviceRecord.Set("device_id", deviceID)
+	deviceRecord.Set("name", deviceID)
+	if err := app.Save(deviceRecord); err != nil {
+		t.Fatalf("save device: %v", err)
+	}
+}
+
 func TestListDevices(t *testing.T) {
 	env := newServerTestEnv(t)
 
@@ -597,7 +650,7 @@ func TestListDevices(t *testing.T) {
 	// List devices
 	client := &http.Client{}
 	req, _ := http.NewRequest("GET", env.server.URL+"/v1/devices", nil)
-	req.Header.Set("Authorization", "Bearer "+env.token)
+	setAuthHeaders(req, env.token, "device-test")
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("list devices: %v", err)
@@ -644,20 +697,20 @@ func TestRevokeDevice(t *testing.T) {
 	createTestDeviceToken(t, app, userID, "device-b")
 
 	// Get device B's ID
-	deviceBID := getSecondDeviceID(t, ts.URL, tokenA)
+	deviceBID := getSecondDeviceID(t, ts.URL, tokenA, "device-a")
 
 	// Revoke device B using device A's token
-	revokeDevice(t, ts.URL, tokenA, deviceBID)
+	revokeDevice(t, ts.URL, tokenA, "device-a", deviceBID)
 
 	// Device A token still works (200) - JWT tokens are user-level, not device-level
-	verifyTokenStatus(t, ts.URL, tokenA, userID, http.StatusOK)
+	verifyTokenStatus(t, ts.URL, tokenA, "device-a", userID, http.StatusOK)
 }
 
-func getSecondDeviceID(t *testing.T, baseURL, token string) string {
+func getSecondDeviceID(t *testing.T, baseURL, token, deviceID string) string {
 	t.Helper()
 	client := &http.Client{}
 	req, _ := http.NewRequest("GET", baseURL+"/v1/devices", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	setAuthHeaders(req, token, deviceID)
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("list devices: %v", err)
@@ -682,11 +735,11 @@ func getSecondDeviceID(t *testing.T, baseURL, token string) string {
 	return body.Devices[1].DeviceID
 }
 
-func revokeDevice(t *testing.T, baseURL, token, deviceID string) {
+func revokeDevice(t *testing.T, baseURL, token, callerDeviceID, deviceID string) {
 	t.Helper()
 	client := &http.Client{}
 	req, _ := http.NewRequest("DELETE", baseURL+"/v1/devices/"+deviceID, nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	setAuthHeaders(req, token, callerDeviceID)
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("revoke device: %v", err)
@@ -701,11 +754,11 @@ func revokeDevice(t *testing.T, baseURL, token, deviceID string) {
 	}
 }
 
-func verifyTokenStatus(t *testing.T, baseURL, token, userID string, expectedStatus int) {
+func verifyTokenStatus(t *testing.T, baseURL, token, deviceID, userID string, expectedStatus int) {
 	t.Helper()
 	client := &http.Client{}
 	req, _ := http.NewRequest("GET", baseURL+"/v1/sync/pull?user_id="+userID+"&since=0", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	setAuthHeaders(req, token, deviceID)
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("verify token request: %v", err)
@@ -756,7 +809,7 @@ func testCompaction(t *testing.T, env *serverTestEnv) {
 	client := vault.NewClient(vault.SyncConfig{
 		AppID:     "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:   env.server.URL,
-		DeviceID:  "device-a",
+		DeviceID:  env.deviceID,
 		AuthToken: env.token,
 	})
 	if err := client.Compact(env.ctx, env.userID, "todo"); err != nil {
@@ -793,7 +846,7 @@ func pushTestChanges(t *testing.T, env *serverTestEnv, count int) {
 	client := vault.NewClient(vault.SyncConfig{
 		AppID:     "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:   env.server.URL,
-		DeviceID:  "device-a",
+		DeviceID:  env.deviceID,
 		AuthToken: env.token,
 	})
 	for i := 0; i < count; i++ {
@@ -805,7 +858,7 @@ func pushTestChanges(t *testing.T, env *serverTestEnv, count int) {
 		if err != nil {
 			t.Fatalf("marshal change: %v", err)
 		}
-		envl, err := vault.Encrypt(env.keys.EncKey, changeBytes, change.AAD(env.userID, "device-a"))
+		envl, err := vault.Encrypt(env.keys.EncKey, changeBytes, change.AAD(env.userID, env.deviceID))
 		if err != nil {
 			t.Fatalf("encrypt change: %v", err)
 		}
@@ -842,7 +895,7 @@ func createTestSnapshot(t *testing.T, env *serverTestEnv) {
 	if err != nil {
 		t.Fatalf("create snapshot request: %v", err)
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+env.token)
+	setAuthHeaders(httpReq, env.token, "device-test")
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(httpReq)
@@ -859,6 +912,7 @@ func createTestSnapshot(t *testing.T, env *serverTestEnv) {
 
 func verifySnapshotInPull(t *testing.T, env *serverTestEnv) {
 	t.Helper()
+	ensureDeviceRecord(t, env.srv.app, env.userID, "device-b")
 	client := vault.NewClient(vault.SyncConfig{
 		AppID:     "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:   env.server.URL,
@@ -880,6 +934,7 @@ func verifySnapshotInPull(t *testing.T, env *serverTestEnv) {
 // TestAccountMigration tests migrating vault data from one userID to another.
 // With JWT auth, the token remains valid after migration (JWT is PocketBase user-level,
 // not vault userID-level). The migration moves devices to the new vault userID.
+// After migration, old devices belong to new userID, so we need a fresh device.
 func TestAccountMigration(t *testing.T) {
 	env := newServerTestEnv(t)
 	env.pushChange(t, "device-a")
@@ -888,7 +943,9 @@ func TestAccountMigration(t *testing.T) {
 	callMigrateEndpoint(t, env, newUserID)
 	verifyDevicesMigrated(t, env, newUserID)
 	// With JWT auth, the token remains valid (it's tied to PocketBase user, not vault userID)
-	verifyTokenStillValidAfterMigration(t, env)
+	// However, the old device now belongs to newUserID, so we need to create a fresh device
+	// to verify the token still works.
+	verifyTokenStillValidWithNewDevice(t, env)
 }
 
 func TestRateLimiterWithZeroIntervalInServer(t *testing.T) {
@@ -904,7 +961,7 @@ func TestRateLimiterWithZeroIntervalInServer(t *testing.T) {
 	// Make 100 rapid requests - all should succeed
 	for i := 0; i < 100; i++ {
 		req, _ := http.NewRequest("GET", env.server.URL+"/v1/sync/pull?user_id="+env.userID+"&since=0", nil)
-		req.Header.Set("Authorization", "Bearer "+env.token)
+		setAuthHeaders(req, env.token, "device-test")
 		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatalf("request %d failed: %v", i, err)
@@ -918,10 +975,8 @@ func TestRateLimiterWithZeroIntervalInServer(t *testing.T) {
 	}
 }
 
-// TestSelfRevocationAllowedWithJWTAuth verifies that with JWT auth, we cannot
-// detect which device is making the request, so self-revocation is allowed.
-// Self-revocation protection must be enforced client-side with JWT auth.
-func TestSelfRevocationAllowedWithJWTAuth(t *testing.T) {
+// TestSelfRevocationBlocked verifies that revoking the current device is rejected.
+func TestSelfRevocationBlocked(t *testing.T) {
 	dir := t.TempDir()
 	app := createTestApp(t, dir)
 	srv := &Server{
@@ -935,13 +990,12 @@ func TestSelfRevocationAllowedWithJWTAuth(t *testing.T) {
 	tokenA, userID := createTestUserAndTokenWithID(t, app, "device-a")
 
 	// Get device A's ID
-	deviceAID := getFirstDeviceID(t, ts.URL, tokenA)
+	deviceAID := getFirstDeviceID(t, ts.URL, tokenA, "device-a")
 
-	// With JWT auth, self-revocation succeeds because server can't detect which device
-	// is making the request (JWT tokens are user-level, not device-level)
+	// Server rejects attempts to revoke the device making the request
 	client := &http.Client{}
 	req, _ := http.NewRequest("DELETE", ts.URL+"/v1/devices/"+deviceAID, nil)
-	req.Header.Set("Authorization", "Bearer "+tokenA)
+	setAuthHeaders(req, tokenA, "device-a")
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("revoke self request: %v", err)
@@ -951,19 +1005,19 @@ func TestSelfRevocationAllowedWithJWTAuth(t *testing.T) {
 			t.Fatalf("close response: %v", err)
 		}
 	}()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 (revocation succeeds with JWT auth), got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 when revoking current device, got %d", resp.StatusCode)
 	}
 
 	// Token still works (JWT tokens are user-level, not invalidated by device revocation)
-	verifyTokenStatus(t, ts.URL, tokenA, userID, http.StatusOK)
+	verifyTokenStatus(t, ts.URL, tokenA, "device-a", userID, http.StatusOK)
 }
 
-func getFirstDeviceID(t *testing.T, baseURL, token string) string {
+func getFirstDeviceID(t *testing.T, baseURL, token, deviceID string) string {
 	t.Helper()
 	client := &http.Client{}
 	req, _ := http.NewRequest("GET", baseURL+"/v1/devices", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	setAuthHeaders(req, token, deviceID)
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("list devices: %v", err)
@@ -1016,7 +1070,7 @@ func callMigrateEndpoint(t *testing.T, env *serverTestEnv, newUserID string) {
 	if err != nil {
 		t.Fatalf("create migrate request: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+env.token)
+	setAuthHeaders(req, env.token, "device-test")
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
@@ -1056,13 +1110,19 @@ func verifyDevicesMigrated(t *testing.T, env *serverTestEnv, newUserID string) {
 	}
 }
 
-// verifyTokenStillValidAfterMigration confirms that JWT tokens remain valid after
+// verifyTokenStillValidWithNewDevice confirms that JWT tokens remain valid after
 // vault data migration. JWT tokens are tied to PocketBase users, not vault userIDs.
-func verifyTokenStillValidAfterMigration(t *testing.T, env *serverTestEnv) {
+// Since the old device was migrated to the new userID, we create a fresh device.
+func verifyTokenStillValidWithNewDevice(t *testing.T, env *serverTestEnv) {
 	t.Helper()
+
+	// Create a new device for the authenticated user since old devices were migrated
+	newDeviceID := "post-migration-device"
+	ensureDeviceRecord(t, env.srv.app, env.userID, newDeviceID)
+
 	client := &http.Client{}
 	checkReq, _ := http.NewRequest("GET", env.server.URL+"/v1/sync/pull?user_id="+env.userID+"&since=0", nil)
-	checkReq.Header.Set("Authorization", "Bearer "+env.token)
+	setAuthHeaders(checkReq, env.token, newDeviceID)
 	checkResp, err := client.Do(checkReq)
 	if err != nil {
 		t.Fatalf("check token request: %v", err)
@@ -1079,11 +1139,18 @@ func TestPerItemDeviceID(t *testing.T) {
 	env := newServerTestEnv(t)
 	deviceIDs := []string{"device-a", "device-b", "device-c"}
 
+	// Register the main client device and all per-item device IDs
+	mainDevice := "rotation-device"
+	ensureDeviceRecord(t, env.srv.app, env.userID, mainDevice)
+	for _, deviceID := range deviceIDs {
+		ensureDeviceRecord(t, env.srv.app, env.userID, deviceID)
+	}
+
 	pushItems := buildPerItemDeviceIDPushItems(t, env, deviceIDs)
 	client := vault.NewClient(vault.SyncConfig{
 		AppID:     "550e8400-e29b-41d4-a716-446655440000",
 		BaseURL:   env.server.URL,
-		DeviceID:  "rotation-device",
+		DeviceID:  mainDevice,
 		AuthToken: env.token,
 	})
 
@@ -1216,7 +1283,7 @@ func TestWipeDeletesUserData(t *testing.T) {
 
 	// Call wipe endpoint
 	req, _ := http.NewRequest("POST", env.server.URL+"/v1/sync/wipe", nil)
-	req.Header.Set("Authorization", "Bearer "+env.token)
+	setAuthHeaders(req, env.token, "device-a")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("wipe request: %v", err)

@@ -25,6 +25,8 @@ import (
 	_ "suitesync/cmd/syncvaultd/migrations" // Import migrations
 )
 
+const deviceHeader = "X-Vault-Device-ID"
+
 // Server bundles state for syncvaultd handlers.
 type Server struct {
 	app          core.App
@@ -128,6 +130,17 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
+		deviceID := strings.TrimSpace(r.Header.Get(deviceHeader))
+		if deviceID == "" {
+			fail(w, http.StatusBadRequest, "device id header required")
+			return
+		}
+
+		if err := s.ensureDeviceAllowed(info.userID, deviceID); err != nil {
+			fail(w, http.StatusForbidden, err.Error())
+			return
+		}
+
 		// Rate limit check
 		if s.limiters != nil {
 			limiter := s.limiters.get(info.userID)
@@ -138,7 +151,7 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		ctx := context.WithValue(r.Context(), ctxUserIDKey{}, info.userID)
-		ctx = context.WithValue(ctx, ctxDeviceIDKey{}, info.deviceID)
+		ctx = context.WithValue(ctx, ctxDeviceIDKey{}, deviceID)
 		next(w, r.WithContext(ctx))
 	}
 }
@@ -163,6 +176,9 @@ func (s *Server) authUserJWT(token string) (authInfo, error) {
 	userRecord, err := s.app.FindAuthRecordByToken(token, core.TokenTypeAuth)
 	if err != nil {
 		return authInfo{}, errors.New("invalid token")
+	}
+	if !userRecord.Verified() {
+		return authInfo{}, errors.New("account not verified")
 	}
 
 	// JWT tokens don't have device_id - use empty string
@@ -215,9 +231,21 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate device is registered and not revoked
-	if err := s.validateDeviceRegistration(authUser, req.DeviceID); err != nil {
-		fail(w, http.StatusForbidden, err.Error())
+	headerDevice := r.Context().Value(ctxDeviceIDKey{}).(string)
+	if req.DeviceID != headerDevice {
+		fail(w, http.StatusBadRequest, "device mismatch")
 		return
+	}
+
+	for _, ch := range req.Changes {
+		perDevice := ch.DeviceID
+		if perDevice == "" || perDevice == req.DeviceID {
+			continue
+		}
+		if err := s.ensureDeviceExists(authUser, perDevice); err != nil {
+			fail(w, http.StatusBadRequest, "invalid per-item device_id")
+			return
+		}
 	}
 
 	ack, err := s.insertChanges(r.Context(), req)
