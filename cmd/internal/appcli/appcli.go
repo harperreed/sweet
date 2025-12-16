@@ -156,6 +156,11 @@ ON CONFLICT(entity, entity_id) DO UPDATE SET
 }
 
 func (a *App) queueChange(ctx context.Context, entityID string, op vault.Op, payload map[string]any) error {
+	// Validate UserID is set when queueing changes
+	if a.opts.UserID == "" {
+		return errors.New("user id required for queueing changes")
+	}
+
 	// Get current version before update
 	baseVersion, err := a.GetVersion(ctx, a.opts.Entity, entityID)
 	if err != nil {
@@ -194,12 +199,12 @@ func (a *App) queueChange(ctx context.Context, entityID string, op vault.Op, pay
 	if err != nil {
 		return err
 	}
-	aad := change.AAD(a.keys.UserID(), a.opts.DeviceID)
+	aad := change.AAD(a.opts.UserID, a.opts.DeviceID)
 	env, err := vault.Encrypt(a.keys.EncKey, plain, aad)
 	if err != nil {
 		return err
 	}
-	if err := a.store.EnqueueEncryptedChange(ctx, change, a.keys.UserID(), a.opts.DeviceID, env); err != nil {
+	if err := a.store.EnqueueEncryptedChange(ctx, change, a.opts.UserID, a.opts.DeviceID, env); err != nil {
 		return err
 	}
 

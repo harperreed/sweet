@@ -23,7 +23,7 @@ func TestKVSetAndGet(t *testing.T) {
 	appDB := filepath.Join(tmpDir, "app.db")
 	vaultDB := filepath.Join(tmpDir, "vault.db")
 
-	if err := kvSet([]string{"-seed", seedPhrase, "-app-db", appDB, "-vault-db", vaultDB, "testkey", "testvalue"}); err != nil {
+	if err := kvSet([]string{"-seed", seedPhrase, "-app-db", appDB, "-vault-db", vaultDB, "-user-id", "test-user-id", "testkey", "testvalue"}); err != nil {
 		t.Fatalf("kvSet failed: %v", err)
 	}
 
@@ -61,11 +61,11 @@ func TestKVSetUpdate(t *testing.T) {
 	appDB := filepath.Join(tmpDir, "app.db")
 	vaultDB := filepath.Join(tmpDir, "vault.db")
 
-	if err := kvSet([]string{"-seed", seedPhrase, "-app-db", appDB, "-vault-db", vaultDB, "updatekey", "original"}); err != nil {
+	if err := kvSet([]string{"-seed", seedPhrase, "-app-db", appDB, "-vault-db", vaultDB, "-user-id", "test-user-id", "updatekey", "original"}); err != nil {
 		t.Fatalf("first kvSet failed: %v", err)
 	}
 
-	if err := kvSet([]string{"-seed", seedPhrase, "-app-db", appDB, "-vault-db", vaultDB, "updatekey", "updated"}); err != nil {
+	if err := kvSet([]string{"-seed", seedPhrase, "-app-db", appDB, "-vault-db", vaultDB, "-user-id", "test-user-id", "updatekey", "updated"}); err != nil {
 		t.Fatalf("second kvSet failed: %v", err)
 	}
 
@@ -120,7 +120,7 @@ func TestKVList(t *testing.T) {
 	}
 
 	for k, v := range keys {
-		if err := kvSet([]string{"-seed", seedPhrase, "-app-db", appDB, "-vault-db", vaultDB, k, v}); err != nil {
+		if err := kvSet([]string{"-seed", seedPhrase, "-app-db", appDB, "-vault-db", vaultDB, "-user-id", "test-user-id", k, v}); err != nil {
 			t.Fatalf("kvSet failed for %s: %v", k, err)
 		}
 	}
@@ -137,11 +137,11 @@ func TestKVDelete(t *testing.T) {
 	appDB := filepath.Join(tmpDir, "app.db")
 	vaultDB := filepath.Join(tmpDir, "vault.db")
 
-	if err := kvSet([]string{"-seed", seedPhrase, "-app-db", appDB, "-vault-db", vaultDB, "deletekey", "deletevalue"}); err != nil {
+	if err := kvSet([]string{"-seed", seedPhrase, "-app-db", appDB, "-vault-db", vaultDB, "-user-id", "test-user-id", "deletekey", "deletevalue"}); err != nil {
 		t.Fatalf("kvSet failed: %v", err)
 	}
 
-	if err := kvDelete([]string{"-seed", seedPhrase, "-app-db", appDB, "-vault-db", vaultDB, "deletekey"}); err != nil {
+	if err := kvDelete([]string{"-seed", seedPhrase, "-app-db", appDB, "-vault-db", vaultDB, "-user-id", "test-user-id", "deletekey"}); err != nil {
 		t.Fatalf("kvDelete failed: %v", err)
 	}
 

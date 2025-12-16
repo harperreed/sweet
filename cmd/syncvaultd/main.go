@@ -214,6 +214,12 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate device is registered and not revoked
+	if err := s.validateDeviceRegistration(authUser, req.DeviceID); err != nil {
+		fail(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	ack, err := s.insertChanges(r.Context(), req)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
