@@ -43,9 +43,15 @@ func isValidUUID(s string) bool {
 	return err == nil
 }
 
-// prefixedEntity returns the entity name with AppID namespace prefix.
-func (c *Client) prefixedEntity(entity string) string {
+// PrefixedEntity returns the entity name with AppID namespace prefix.
+// Used by push flows to ensure entities are namespaced before encryption.
+func (c *Client) PrefixedEntity(entity string) string {
 	return c.cfg.AppID + "." + entity
+}
+
+// prefixedEntity is an unexported alias for internal use.
+func (c *Client) prefixedEntity(entity string) string {
+	return c.PrefixedEntity(entity)
 }
 
 // stripPrefix removes the AppID namespace prefix from an entity name.

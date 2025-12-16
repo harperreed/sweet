@@ -171,7 +171,11 @@ func (a *App) queueChange(ctx context.Context, entityID string, op vault.Op, pay
 		copyPayload["updated_at"] = time.Now().UTC().Unix()
 		body = copyPayload
 	}
-	change, err := vault.NewChangeWithVersion(a.opts.Entity, entityID, op, body, baseVersion)
+
+	// Prefix entity with AppID for namespace isolation.
+	// This ensures the AAD includes the prefixed entity for cryptographic binding.
+	prefixedEntity := a.client.PrefixedEntity(a.opts.Entity)
+	change, err := vault.NewChangeWithVersion(prefixedEntity, entityID, op, body, baseVersion)
 	if err != nil {
 		return err
 	}
@@ -179,7 +183,10 @@ func (a *App) queueChange(ctx context.Context, entityID string, op vault.Op, pay
 		change.Deleted = true
 	}
 
-	if err := a.ApplyChange(ctx, change); err != nil {
+	// Apply locally with unprefixed entity (consistent with how sync.go strips prefix before apply)
+	localChange := change
+	localChange.Entity = a.opts.Entity
+	if err := a.ApplyChange(ctx, localChange); err != nil {
 		return err
 	}
 

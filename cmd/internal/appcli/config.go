@@ -24,6 +24,7 @@ func (rc *RuntimeConfig) BindFlags(fs *flag.FlagSet) {
 	fs.StringVar(&rc.DeviceID, "device", rc.DeviceID, "stable device identifier")
 	fs.StringVar(&rc.ServerURL, "server", rc.ServerURL, "sync server base URL")
 	fs.StringVar(&rc.AuthToken, "token", rc.AuthToken, "bearer token")
+	fs.StringVar(&rc.UserID, "user-id", rc.UserID, "server-side user ID (PocketBase record ID)")
 	fs.BoolVar(&rc.AutoSync, "auto-sync", rc.AutoSync, "sync after each write")
 }
 
