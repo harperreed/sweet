@@ -21,6 +21,7 @@ type SyncEvents struct {
 // userID is the server-side user identifier (PocketBase record ID).
 // keys is used only for encryption/decryption, not for user identification.
 // Optionally accepts a *SyncEvents for observability hooks.
+// Automatically refreshes auth token if expired and refresh token is available.
 func Sync(ctx context.Context, store *Store, client *Client, keys Keys, userID string, apply ApplyFn, events ...*SyncEvents) error {
 	var ev *SyncEvents
 	if len(events) > 0 {
@@ -28,6 +29,11 @@ func Sync(ctx context.Context, store *Store, client *Client, keys Keys, userID s
 	}
 	if ev != nil && ev.OnStart != nil {
 		ev.OnStart()
+	}
+
+	// Ensure token is valid before syncing
+	if err := client.EnsureValidToken(ctx); err != nil {
+		return err
 	}
 
 	pushed, err := pushOutboxWithEvents(ctx, store, client, userID, ev)

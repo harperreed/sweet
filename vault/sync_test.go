@@ -3,12 +3,14 @@ package vault
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestSyncPushAndPull(t *testing.T) {
@@ -66,10 +68,11 @@ func newSyncTestEnv(t *testing.T) *syncTestEnv {
 	t.Cleanup(ts.Close)
 
 	client := NewClient(SyncConfig{
-		AppID:     "550e8400-e29b-41d4-a716-446655440000",
-		BaseURL:   ts.URL,
-		DeviceID:  "dev-a",
-		AuthToken: "test-token",
+		AppID:        "550e8400-e29b-41d4-a716-446655440000",
+		BaseURL:      ts.URL,
+		DeviceID:     "dev-a",
+		AuthToken:    "test-token",
+		TokenExpires: time.Now().Add(1 * time.Hour),
 	})
 
 	return &syncTestEnv{
@@ -232,10 +235,11 @@ func TestPushItemPreservesPerItemDeviceID(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(SyncConfig{
-		AppID:     "550e8400-e29b-41d4-a716-446655440000",
-		BaseURL:   ts.URL,
-		DeviceID:  "rotation-device",
-		AuthToken: "test-token",
+		AppID:        "550e8400-e29b-41d4-a716-446655440000",
+		BaseURL:      ts.URL,
+		DeviceID:     "rotation-device",
+		AuthToken:    "test-token",
+		TokenExpires: time.Now().Add(1 * time.Hour),
 	})
 
 	// Create changes that were originally from different devices
@@ -516,5 +520,102 @@ func TestPullFlowStripsPrefix(t *testing.T) {
 	// Verify prefix was stripped
 	if appliedEntity != "item" {
 		t.Errorf("expected entity=item (prefix stripped), got %q", appliedEntity)
+	}
+}
+
+func TestSyncRefreshesTokenAutomatically(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := OpenStore(filepath.Join(dir, "sync.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	keys := testDeriveKeys(t)
+
+	// Create fake server that handles both sync and auth endpoints
+	var tokenRefreshed bool
+	fake := newFakeSyncServer()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/sync/push", fake.handlePush)
+	mux.HandleFunc("/v1/sync/pull", fake.handlePull)
+	mux.HandleFunc("/v1/auth/pb/refresh", func(w http.ResponseWriter, r *http.Request) {
+		tokenRefreshed = true
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"token":         "new-token",
+			"refresh_token": "new-refresh-token",
+			"expires_unix":  time.Now().Add(1 * time.Hour).Unix(),
+		})
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	// Create client with expired token but valid refresh token
+	var callbackCalled bool
+	client := NewClient(SyncConfig{
+		AppID:        "550e8400-e29b-41d4-a716-446655440000",
+		BaseURL:      ts.URL,
+		DeviceID:     "dev-a",
+		AuthToken:    "expired-token",
+		RefreshToken: "refresh-token",
+		TokenExpires: time.Now().Add(-1 * time.Hour), // expired
+		OnTokenRefresh: func(token, refresh string, expires time.Time) {
+			callbackCalled = true
+		},
+	})
+
+	// Sync should automatically refresh the token
+	err = Sync(ctx, store, client, keys, keys.UserID(), func(ctx context.Context, c Change) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("sync should succeed after token refresh: %v", err)
+	}
+
+	if !tokenRefreshed {
+		t.Error("expected token to be refreshed")
+	}
+	if !callbackCalled {
+		t.Error("expected OnTokenRefresh callback to be called")
+	}
+}
+
+func TestSyncFailsWhenTokenExpiredWithoutRefresh(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := OpenStore(filepath.Join(dir, "sync.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	keys := testDeriveKeys(t)
+
+	fake := newFakeSyncServer()
+	ts := httptest.NewServer(fake.handler())
+	defer ts.Close()
+
+	// Create client with expired token and NO refresh token
+	client := NewClient(SyncConfig{
+		AppID:        "550e8400-e29b-41d4-a716-446655440000",
+		BaseURL:      ts.URL,
+		DeviceID:     "dev-a",
+		AuthToken:    "expired-token",
+		RefreshToken: "",                             // no refresh token
+		TokenExpires: time.Now().Add(-1 * time.Hour), // expired
+	})
+
+	// Sync should fail with ErrTokenExpired
+	err = Sync(ctx, store, client, keys, keys.UserID(), func(ctx context.Context, c Change) error {
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected error when token expired without refresh token")
+	}
+	if !errors.Is(err, ErrTokenExpired) {
+		t.Errorf("expected ErrTokenExpired, got %v", err)
 	}
 }

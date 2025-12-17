@@ -326,7 +326,13 @@ func (c *Client) Health(ctx context.Context) HealthStatus {
 
 // EnsureValidToken refreshes the token if it's expired or about to expire.
 // Returns ErrTokenExpired if refresh is needed but no refresh token is available.
+// Skips validation if TokenExpires is not set (zero value) - assumes token is valid.
 func (c *Client) EnsureValidToken(ctx context.Context) error {
+	// Skip validation if token expiry was never configured (test scenarios, etc.)
+	if c.cfg.TokenExpires.IsZero() {
+		return nil
+	}
+
 	// Token valid for more than 5 minutes - no refresh needed
 	if time.Until(c.cfg.TokenExpires) > 5*time.Minute {
 		return nil

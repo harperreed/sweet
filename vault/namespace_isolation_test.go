@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestCrossAppIsolation verifies that two apps with different AppIDs
@@ -425,10 +426,11 @@ func TestNamespaceFilteringOnPull(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	app.client = NewClient(SyncConfig{
-		AppID:     app.appID,
-		BaseURL:   server.URL,
-		DeviceID:  app.deviceID,
-		AuthToken: "test-token",
+		AppID:        app.appID,
+		BaseURL:      server.URL,
+		DeviceID:     app.deviceID,
+		AuthToken:    "test-token",
+		TokenExpires: time.Now().Add(1 * time.Hour),
 	})
 
 	// Prepare three changes on the server:
