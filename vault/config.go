@@ -31,6 +31,11 @@ type SyncConfig struct {
 	Timeout      time.Duration
 	Retry        RetryConfig // retry settings (zero uses defaults)
 
+	// AllowUnprefixedEntities enables backward compatibility mode for legacy data.
+	// When true, entities without the AppID prefix will be processed during pull.
+	// Use this for apps that have existing data from before namespace isolation was added.
+	AllowUnprefixedEntities bool
+
 	// OnTokenRefresh is called when tokens are refreshed.
 	// Clients should persist the new tokens.
 	OnTokenRefresh func(token, refreshToken string, expires time.Time)

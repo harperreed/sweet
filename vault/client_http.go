@@ -71,6 +71,23 @@ func (c *Client) hasAppPrefix(entity string) bool {
 	return strings.HasPrefix(entity, prefix)
 }
 
+// allowsUnprefixedEntities returns true if backward compatibility mode is enabled.
+func (c *Client) allowsUnprefixedEntities() bool {
+	return c.cfg.AllowUnprefixedEntities
+}
+
+// hasAnyUUIDPrefix checks if an entity has any UUID-like prefix (from any app).
+// Used to distinguish between truly unprefixed legacy data and other apps' data.
+func hasAnyUUIDPrefix(entity string) bool {
+	// Look for pattern: UUID.something (UUID is 36 chars with hyphens)
+	if len(entity) < 37 || entity[36] != '.' {
+		return false
+	}
+	prefix := entity[:36]
+	_, err := uuid.Parse(prefix)
+	return err == nil
+}
+
 // PushReq is sent by clients to upload encrypted changes.
 type PushReq struct {
 	UserID   string     `json:"user_id"`

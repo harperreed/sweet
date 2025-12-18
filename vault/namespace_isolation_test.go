@@ -494,6 +494,109 @@ func TestNamespaceFilteringOnPull(t *testing.T) {
 	}
 }
 
+// TestBackwardCompatLegacyData verifies that apps with AllowUnprefixedEntities=true
+// can process legacy data that was stored before namespace isolation was added.
+func TestBackwardCompatLegacyData(t *testing.T) {
+	ctx := context.Background()
+
+	app := setupIsolationApp(t, "550e8400-e29b-41d4-a716-446655440000", "app-a")
+
+	fake := newFakeSyncServer()
+	server := httptest.NewServer(fake.handler())
+	t.Cleanup(server.Close)
+
+	// Enable backward compatibility mode for legacy data
+	app.client = NewClient(SyncConfig{
+		AppID:                   app.appID,
+		BaseURL:                 server.URL,
+		DeviceID:                app.deviceID,
+		AuthToken:               "test-token",
+		TokenExpires:            time.Now().Add(1 * time.Hour),
+		AllowUnprefixedEntities: true, // Enable backward compat
+	})
+
+	// Prepare three changes on the server:
+	// 1. Our app's change (new format with prefix)
+	ourChange, _ := NewChange(app.appID+".doc", "doc-1", OpUpsert, map[string]any{"owner": "us"})
+	ourPlain, _ := json.Marshal(ourChange)
+	ourEnv, _ := Encrypt(app.keys.EncKey, ourPlain, ourChange.AAD(app.userID, "dev-x"))
+
+	// 2. Another app's change (different namespace - should still be filtered)
+	otherAppID := "660e8400-e29b-41d4-a716-446655440000"
+	otherChange, _ := NewChange(otherAppID+".doc", "doc-2", OpUpsert, map[string]any{"owner": "other"})
+	otherPlain, _ := json.Marshal(otherChange)
+	otherEnv, _ := Encrypt(app.keys.EncKey, otherPlain, otherChange.AAD(app.userID, "dev-y"))
+
+	// 3. Legacy change without namespace prefix (should be accepted in backward compat mode)
+	legacyChange, _ := NewChange("doc", "doc-3", OpUpsert, map[string]any{"owner": "legacy"})
+	legacyPlain, _ := json.Marshal(legacyChange)
+	legacyEnv, _ := Encrypt(app.keys.EncKey, legacyPlain, legacyChange.AAD(app.userID, "dev-z"))
+
+	// Server returns all three changes
+	fake.setPull([]PullItem{
+		{Seq: 1, ChangeID: ourChange.ChangeID, DeviceID: "dev-x", Entity: ourChange.Entity, Env: ourEnv},
+		{Seq: 2, ChangeID: otherChange.ChangeID, DeviceID: "dev-y", Entity: otherChange.Entity, Env: otherEnv},
+		{Seq: 3, ChangeID: legacyChange.ChangeID, DeviceID: "dev-z", Entity: legacyChange.Entity, Env: legacyEnv},
+	})
+
+	// Sync and collect applied changes
+	applied := []Change{}
+	err := Sync(ctx, app.store, app.client, app.keys, app.userID, func(ctx context.Context, c Change) error {
+		applied = append(applied, c)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	// Should apply BOTH our app's change AND the legacy change (backward compat)
+	// But NOT the other app's change (different prefix)
+	if len(applied) != 2 {
+		t.Fatalf("expected 2 applied changes (ours + legacy), got %d", len(applied))
+	}
+
+	// Verify we got both our data and legacy data
+	foundOurs := false
+	foundLegacy := false
+	for _, c := range applied {
+		var payload map[string]any
+		if err := json.Unmarshal(c.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal payload: %v", err)
+		}
+		if payload["owner"] == "us" {
+			foundOurs = true
+			if c.Entity != "doc" {
+				t.Errorf("our change should have entity 'doc' (prefix stripped), got %q", c.Entity)
+			}
+		}
+		if payload["owner"] == "legacy" {
+			foundLegacy = true
+			if c.Entity != "doc" {
+				t.Errorf("legacy change should have entity 'doc', got %q", c.Entity)
+			}
+		}
+		if payload["owner"] == "other" {
+			t.Errorf("should NOT receive other app's data even in backward compat mode")
+		}
+	}
+
+	if !foundOurs {
+		t.Error("did not receive our app's data")
+	}
+	if !foundLegacy {
+		t.Error("did not receive legacy data (backward compat should have allowed it)")
+	}
+
+	// Verify last_pulled_seq advanced to highest seq (3)
+	seq, err := app.store.GetState(ctx, "last_pulled_seq", "")
+	if err != nil {
+		t.Fatalf("get last_pulled_seq: %v", err)
+	}
+	if seq != "3" {
+		t.Errorf("expected last_pulled_seq=3 (highest seq), got %q", seq)
+	}
+}
+
 // Helper: setupIsolationApp creates a test app with its own store, keys, and config.
 // Does NOT create the client - caller should create it with the appropriate server URL.
 func setupIsolationApp(t *testing.T, appID, deviceID string) *isolationApp {

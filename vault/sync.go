@@ -75,7 +75,14 @@ func pullAndApply(ctx context.Context, client *Client, keys Keys, userID string,
 	pulled := 0
 	for _, it := range pull.Items {
 		// Filter: only process items from our app namespace
-		if !client.hasAppPrefix(it.Entity) {
+		// - Accept if entity has our AppID prefix
+		// - In backward compat mode, also accept truly unprefixed entities (legacy data)
+		// - Reject entities with another app's UUID prefix (cross-app isolation)
+		hasOurPrefix := client.hasAppPrefix(it.Entity)
+		hasOtherPrefix := !hasOurPrefix && hasAnyUUIDPrefix(it.Entity)
+		isTrulyUnprefixed := !hasOurPrefix && !hasOtherPrefix
+
+		if !hasOurPrefix && !(isTrulyUnprefixed && client.allowsUnprefixedEntities()) {
 			// Update maxSeq but don't count as pulled
 			if it.Seq > maxSeq {
 				maxSeq = it.Seq
