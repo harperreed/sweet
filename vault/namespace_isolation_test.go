@@ -41,14 +41,14 @@ func TestCrossAppIsolation(t *testing.T) {
 	})
 
 	// App A creates and syncs an "item" entity
-	appASyncer := NewSyncer(appA.store, appA.client, appA.keys, appA.userID)
+	appASyncer := NewSyncer(appA.store, appA.client, appA.keys, appA.userID, nil)
 	_, err := appASyncer.QueueChange(ctx, "item", "item-1", OpUpsert, map[string]any{"owner": "app-a"})
 	if err != nil {
 		t.Fatalf("app A queue: %v", err)
 	}
 
 	// App B creates and syncs an "item" entity with the same name
-	appBSyncer := NewSyncer(appB.store, appB.client, appB.keys, appB.userID)
+	appBSyncer := NewSyncer(appB.store, appB.client, appB.keys, appB.userID, nil)
 	_, err = appBSyncer.QueueChange(ctx, "item", "item-2", OpUpsert, map[string]any{"owner": "app-b"})
 	if err != nil {
 		t.Fatalf("app B queue: %v", err)
@@ -196,7 +196,7 @@ func TestCryptographicIsolation(t *testing.T) {
 	})
 
 	// App A creates a change
-	appASyncer := NewSyncer(appA.store, appA.client, appA.keys, appA.userID)
+	appASyncer := NewSyncer(appA.store, appA.client, appA.keys, appA.userID, nil)
 	changeA, err := appASyncer.QueueChange(ctx, "secret", "secret-1", OpUpsert, map[string]any{"data": "app-a-secret"})
 	if err != nil {
 		t.Fatalf("app A queue: %v", err)
@@ -288,13 +288,13 @@ func TestEntityCollisionPrevention(t *testing.T) {
 	})
 
 	// Both apps create entities with identical names
-	appASyncer := NewSyncer(appA.store, appA.client, appA.keys, appA.userID)
+	appASyncer := NewSyncer(appA.store, appA.client, appA.keys, appA.userID, nil)
 	_, err := appASyncer.QueueChange(ctx, "item", "collision-id", OpUpsert, map[string]any{"app": "A", "value": 100})
 	if err != nil {
 		t.Fatalf("app A queue: %v", err)
 	}
 
-	appBSyncer := NewSyncer(appB.store, appB.client, appB.keys, appB.userID)
+	appBSyncer := NewSyncer(appB.store, appB.client, appB.keys, appB.userID, nil)
 	_, err = appBSyncer.QueueChange(ctx, "item", "collision-id", OpUpsert, map[string]any{"app": "B", "value": 200})
 	if err != nil {
 		t.Fatalf("app B queue: %v", err)

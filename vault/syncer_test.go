@@ -38,8 +38,8 @@ func TestSyncerQueueChangePrefixesEntity(t *testing.T) {
 		AuthToken: "token",
 	})
 
-	// Create syncer
-	syncer := NewSyncer(store, client, keys, keys.UserID())
+	// Create syncer (nil apply function since we're only testing queueing)
+	syncer := NewSyncer(store, client, keys, keys.UserID(), nil)
 
 	// Queue a change with unprefixed entity
 	entity := "todo"
@@ -96,7 +96,7 @@ func TestSyncerQueueChangeIncludesPrefixInAAD(t *testing.T) {
 		AuthToken: "tok",
 	})
 
-	syncer := NewSyncer(store, client, keys, keys.UserID())
+	syncer := NewSyncer(store, client, keys, keys.UserID(), nil)
 
 	// Queue change
 	_, err = syncer.QueueChange(ctx, "item", "id-1", OpUpsert, map[string]any{"value": 42})
@@ -149,7 +149,7 @@ func TestSyncerQueueChangeMultipleEntities(t *testing.T) {
 		AuthToken: "t",
 	})
 
-	syncer := NewSyncer(store, client, keys, keys.UserID())
+	syncer := NewSyncer(store, client, keys, keys.UserID(), nil)
 
 	// Queue multiple different entity types
 	entities := []string{"todo", "note", "bookmark", "tag"}
@@ -175,5 +175,137 @@ func TestSyncerQueueChangeMultipleEntities(t *testing.T) {
 		if item.Entity != expected {
 			t.Errorf("item %d: expected %q, got %q", i, expected, item.Entity)
 		}
+	}
+}
+
+func TestSyncerCanSync(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   SyncConfig
+		expected bool
+	}{
+		{
+			name: "fully configured",
+			config: SyncConfig{
+				AppID:     "550e8400-e29b-41d4-a716-446655440000",
+				DeviceID:  "dev-test",
+				BaseURL:   "https://example.com",
+				AuthToken: "token",
+			},
+			expected: true,
+		},
+		{
+			name: "missing base url",
+			config: SyncConfig{
+				AppID:     "550e8400-e29b-41d4-a716-446655440000",
+				DeviceID:  "dev-test",
+				BaseURL:   "",
+				AuthToken: "token",
+			},
+			expected: false,
+		},
+		{
+			name: "missing auth token",
+			config: SyncConfig{
+				AppID:     "550e8400-e29b-41d4-a716-446655440000",
+				DeviceID:  "dev-test",
+				BaseURL:   "https://example.com",
+				AuthToken: "",
+			},
+			expected: false,
+		},
+		{
+			name: "all missing",
+			config: SyncConfig{
+				AppID:    "550e8400-e29b-41d4-a716-446655440000",
+				DeviceID: "dev-test",
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := OpenStore(dir + "/test.db")
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			defer func() { _ = store.Close() }()
+
+			client := NewClient(tt.config)
+			syncer := NewSyncer(store, client, Keys{}, "", nil)
+
+			if got := syncer.CanSync(); got != tt.expected {
+				t.Errorf("CanSync() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestSyncerCanSyncNilClient(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenStore(dir + "/test.db")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	syncer := &Syncer{
+		store:  store,
+		client: nil,
+	}
+
+	if syncer.CanSync() {
+		t.Error("CanSync() should return false with nil client")
+	}
+}
+
+func TestSyncerQueueAndSyncWithoutConfig(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	store, err := OpenStore(dir + "/test.db")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	// Create client without sync credentials
+	client := NewClient(SyncConfig{
+		AppID:    "550e8400-e29b-41d4-a716-446655440000",
+		DeviceID: "dev-test",
+		// BaseURL and AuthToken intentionally not set
+	})
+
+	seed := SeedPhrase{Raw: bytes32(0x42)}
+	params := DefaultKDFParams()
+	params.Time = 1
+	params.MemoryMB = 32
+	keys, err := DeriveKeys(seed, "", params)
+	if err != nil {
+		t.Fatalf("derive keys: %v", err)
+	}
+
+	syncer := NewSyncer(store, client, keys, keys.UserID(), nil)
+
+	// QueueAndSync should succeed (queues locally) even without sync config
+	change, err := syncer.QueueAndSync(ctx, "todo", "task-1", OpUpsert, map[string]any{"text": "test"})
+	if err != nil {
+		t.Fatalf("QueueAndSync: %v", err)
+	}
+
+	if change.EntityID != "task-1" {
+		t.Errorf("expected entityID=task-1, got %s", change.EntityID)
+	}
+
+	// Verify it was queued
+	items, err := store.DequeueBatch(ctx, 10)
+	if err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+
+	if len(items) != 1 {
+		t.Errorf("expected 1 queued item, got %d", len(items))
 	}
 }

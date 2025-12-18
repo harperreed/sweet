@@ -371,7 +371,7 @@ func (e *serverTestEnv) pushChange(t *testing.T, deviceID string) vault.Change {
 	})
 
 	// Use Syncer to properly prefix the entity
-	syncer := vault.NewSyncer(store, client, e.keys, e.userID)
+	syncer := vault.NewSyncer(store, client, e.keys, e.userID, nil)
 	prefixedChange, err := syncer.QueueChange(e.ctx, "todo", "todo-1", vault.OpUpsert, map[string]any{"text": "integration"})
 	if err != nil {
 		t.Fatalf("queue change: %v", err)

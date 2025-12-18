@@ -381,7 +381,7 @@ func TestSyncerPushFlowPrefixesEntities(t *testing.T) {
 	env := newSyncTestEnv(t)
 
 	// Create syncer
-	syncer := NewSyncer(env.store, env.client, env.keys, env.userID)
+	syncer := NewSyncer(env.store, env.client, env.keys, env.userID, nil)
 
 	// Queue changes using syncer (entities will be prefixed)
 	_, err := syncer.QueueChange(env.ctx, "todo", "task-1", OpUpsert, map[string]any{"text": "prefixed"})
