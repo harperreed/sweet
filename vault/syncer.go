@@ -33,7 +33,8 @@ func NewSyncer(store *Store, client *Client, keys Keys, userID string, apply App
 func (s *Syncer) CanSync() bool {
 	return s.client != nil &&
 		s.client.cfg.BaseURL != "" &&
-		s.client.cfg.AuthToken != ""
+		s.client.cfg.AuthToken != "" &&
+		s.userID != ""
 }
 
 // Sync pushes local changes and pulls remote changes.

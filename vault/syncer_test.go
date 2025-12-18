@@ -182,6 +182,7 @@ func TestSyncerCanSync(t *testing.T) {
 	tests := []struct {
 		name     string
 		config   SyncConfig
+		userID   string
 		expected bool
 	}{
 		{
@@ -192,6 +193,7 @@ func TestSyncerCanSync(t *testing.T) {
 				BaseURL:   "https://example.com",
 				AuthToken: "token",
 			},
+			userID:   "user-123",
 			expected: true,
 		},
 		{
@@ -202,6 +204,7 @@ func TestSyncerCanSync(t *testing.T) {
 				BaseURL:   "",
 				AuthToken: "token",
 			},
+			userID:   "user-123",
 			expected: false,
 		},
 		{
@@ -212,6 +215,18 @@ func TestSyncerCanSync(t *testing.T) {
 				BaseURL:   "https://example.com",
 				AuthToken: "",
 			},
+			userID:   "user-123",
+			expected: false,
+		},
+		{
+			name: "missing user id",
+			config: SyncConfig{
+				AppID:     "550e8400-e29b-41d4-a716-446655440000",
+				DeviceID:  "dev-test",
+				BaseURL:   "https://example.com",
+				AuthToken: "token",
+			},
+			userID:   "",
 			expected: false,
 		},
 		{
@@ -220,6 +235,7 @@ func TestSyncerCanSync(t *testing.T) {
 				AppID:    "550e8400-e29b-41d4-a716-446655440000",
 				DeviceID: "dev-test",
 			},
+			userID:   "",
 			expected: false,
 		},
 	}
@@ -234,7 +250,7 @@ func TestSyncerCanSync(t *testing.T) {
 			defer func() { _ = store.Close() }()
 
 			client := NewClient(tt.config)
-			syncer := NewSyncer(store, client, Keys{}, "", nil)
+			syncer := NewSyncer(store, client, Keys{}, tt.userID, nil)
 
 			if got := syncer.CanSync(); got != tt.expected {
 				t.Errorf("CanSync() = %v, want %v", got, tt.expected)
